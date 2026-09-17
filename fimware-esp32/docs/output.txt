@@ -1,0 +1,17 @@
+[PAGAR] Simulacion iniciada desde IP: 192.168.4.2 | producto: Producto 2 | litros: 2.00 | monto: 20.00
+[SISTEMA] Pago QR confirmado -> PAGO_EXITOSO
+[WIFI] Cliente CONECTADO -> MAC: A6:4C:60:CA:8E:EC | clientes actuales: 2
+[SISTEMA] Boquilla pulsada: [2]
+[SISTEMA] Bombeando 10 segundos (por tiempo, sin corte por sensor aun).
+[FLUJO] P1:0 P2:0 P3:0
+[FLUJO] P1:0 P2:0 P3:0
+[FLUJO] P1:0 P2:0 P3:0
+[FLUJO] P1:0 P2:0 P3:0
+[FLUJO] P1:0 P2:0 P3:0
+[FLUJO] P1:0 P2:0 P3:0
+[FLUJO] P1:0 P2:0 P3:0
+[FLUJO] P1:0 P2:0 P3:0
+[FLUJO] P1:0 P2:0 P3:0
+[FLUJO] P1:0 P2:0 P3:0
+[SISTEMA] Dispensado completado.
+[WIFI] Cliente DESCONECTADO -> MAC: B2:87:49:3A:80:ED | clientes actuales: 1

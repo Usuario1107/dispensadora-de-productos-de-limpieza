@@ -1,0 +1,6 @@
+ upload:
+        pio run --target upload
+        pio run --target uploadfs
+
+
+        build_flags = -DCORE_DEBUG_LEVEL=0

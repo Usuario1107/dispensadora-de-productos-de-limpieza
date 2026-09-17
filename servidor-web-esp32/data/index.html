@@ -1,0 +1,661 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dispensador de Detergente</title>
+<style>
+:root {
+  --bg: #F0F3F7;
+  --surface: #FFFFFF;
+  --ink: #1C2B39;
+  --muted: #6B7A8C;
+  --primary: #1877F2;
+  --primary-dark: #0F5FCC;
+  --primary-soft: #E7F0FE;
+  --success: #31A24C;
+  --warn: #F0A73A;
+  --line: #E4E9EF;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  height: 100%;
+}
+
+body {
+  font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  color: var(--ink);
+  background: var(--bg);
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
+.contenedor {
+  width: 100%;
+  max-width: 400px;
+  background: var(--surface);
+  border-radius: 20px;
+  padding: 26px 22px;
+  box-shadow: 0 10px 30px rgba(28, 43, 57, 0.08);
+}
+
+.vista {
+  display: none;
+  text-align: center;
+}
+
+.vista.activa {
+  display: block;
+}
+
+.marca {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin-bottom: 16px;
+  color: var(--primary);
+}
+
+.marca .punto {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--primary);
+}
+
+.marca span {
+  font-size: 0.72rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+h1 {
+  font-size: 1.3rem;
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+
+.subrayo {
+  color: var(--muted);
+  font-size: 0.9rem;
+  margin-bottom: 18px;
+}
+
+.cargando {
+  color: var(--muted);
+  padding: 18px 0;
+}
+
+.aviso {
+  background: #FFF6E8;
+  border: 1px solid #F5DDA8;
+  color: #8A6416;
+  border-radius: 12px;
+  padding: 14px;
+  font-size: 0.9rem;
+}
+
+/* --- Lista de productos --- */
+.lista-productos {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.tarjeta-producto {
+  background: #F7F9FC;
+  border: 2px solid var(--line);
+  border-radius: 14px;
+  padding: 14px;
+  cursor: pointer;
+  text-align: left;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.tarjeta-producto:active {
+  background: var(--primary-soft);
+}
+
+.chip-color {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--acento, var(--primary));
+}
+
+.tarjeta-producto .nombre {
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+.tarjeta-producto .precio {
+  color: var(--muted);
+  font-size: 0.82rem;
+  margin-top: 2px;
+}
+
+/* --- Boton volver --- */
+.btn-volver {
+  background: none;
+  border: none;
+  color: var(--primary);
+  font-size: 0.88rem;
+  margin-bottom: 8px;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+/* --- Cantidades --- */
+.lista-cantidades {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 10px;
+  margin: 16px 0 4px;
+}
+
+.btn-litro {
+  background: #F7F9FC;
+  border: 2px solid var(--line);
+  border-radius: 14px;
+  padding: 16px 8px;
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.btn-litro.seleccionado {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+  color: var(--primary-dark);
+}
+
+.resumen-monto {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px dashed var(--line);
+}
+
+.resumen-monto.oculto {
+  display: none;
+}
+
+.etiqueta-monto {
+  color: var(--muted);
+  font-size: 0.82rem;
+  margin-bottom: 2px;
+}
+
+.monto {
+  font-size: 1.9rem;
+  font-weight: 800;
+  margin-bottom: 14px;
+  color: var(--primary-dark);
+}
+
+.btn-pagar {
+  width: 100%;
+  padding: 15px;
+  background: var(--primary);
+  border: none;
+  border-radius: 12px;
+  color: white;
+  font-size: 1rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.btn-pagar:active {
+  background: var(--primary-dark);
+}
+
+.btn-debug {
+  margin-top: 16px;
+  background: transparent;
+  border: 2px dashed var(--line);
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.btn-debug:active {
+  background: #F7F9FC;
+}
+
+/* --- Loader liviano (solo 3 puntos, bajo costo de render) --- */
+.puntos-carga {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  margin: 10px 0 18px;
+}
+
+.puntos-carga span {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--primary);
+  opacity: 0.3;
+  animation: pulso 1s ease-in-out infinite;
+}
+
+.puntos-carga span:nth-child(2) { animation-delay: 0.15s; }
+.puntos-carga span:nth-child(3) { animation-delay: 0.3s; }
+
+@keyframes pulso {
+  0%, 100% { opacity: 0.25; transform: scale(0.85); }
+  50%      { opacity: 1;    transform: scale(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .puntos-carga span { animation: none; opacity: 0.7; }
+}
+
+#subtitulo-pagando,
+#subtitulo-pago-exitoso {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+/* --- Pago exitoso --- */
+.icono-check {
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  background: #EAF7EE;
+  color: var(--success);
+  font-size: 1.6rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0 auto 14px;
+}
+
+.monto-chico {
+  font-size: 1.3rem;
+  font-weight: 800;
+  color: var(--ink);
+  margin: 6px 0 14px;
+}
+
+/* --- Vista ocupado / listo --- */
+#vista-ocupado p,
+#vista-listo p {
+  color: var(--muted);
+  margin-bottom: 14px;
+}
+
+.icono-estado {
+  font-size: 2.2rem;
+  margin-bottom: 6px;
+}
+</style>
+</head>
+<body>
+
+  <div class="contenedor">
+
+    <div class="marca"><span class="punto"></span><span>Dispensador de Detergente</span></div>
+
+    <!-- VISTA 0: Metodo de pago no disponible -->
+    <section id="vista-metodo-no-disponible" class="vista">
+      <h1>Pago por QR no disponible</h1>
+      <p class="subrayo">Seleccione este método desde el panel de la máquina</p>
+      <div class="aviso">Método actual: <strong id="metodo-actual-texto">-</strong></div>
+    </section>
+
+    <!-- VISTA 1: Seleccion de producto -->
+    <section id="vista-productos" class="vista">
+      <h1>Elige tu detergente</h1>
+      <p class="subrayo">Toca una opción para continuar</p>
+      <div id="lista-productos" class="lista-productos">
+        <p class="cargando">Cargando productos...</p>
+      </div>
+    </section>
+
+    <!-- VISTA 2: Seleccion de cantidad -->
+    <section id="vista-cantidad" class="vista">
+      <button class="btn-volver" id="btn-volver-productos">&larr; Volver</button>
+      <h1 id="nombre-producto-elegido">Producto</h1>
+      <p class="subrayo">Selecciona la cantidad</p>
+      <div class="lista-cantidades">
+        <button class="btn-litro" data-litros="0.5">0.5 L</button>
+        <button class="btn-litro" data-litros="1">1 L</button>
+        <button class="btn-litro" data-litros="2">2 L</button>
+      </div>
+      <div id="resumen-monto" class="resumen-monto oculto">
+        <p class="etiqueta-monto">Total a pagar</p>
+        <p class="monto" id="monto-total"> Bs0.00</p>
+        <button id="btn-pagar" class="btn-pagar">Pagar</button>
+      </div>
+    </section>
+
+    <!-- VISTA 3: Simulando pago -->
+    <section id="vista-pagando" class="vista">
+      <h1>Procesando pago...</h1>
+      <p id="subtitulo-pagando">Un momento por favor</p>
+      <div class="puntos-carga"><span></span><span></span><span></span></div>
+    </section>
+
+    <!-- VISTA 4: Pago exitoso, esperando dispensado -->
+    <section id="vista-pago-exitoso" class="vista">
+      <div class="icono-check">✓</div>
+      <h1>Pago exitoso</h1>
+      <p class="monto-chico" id="monto-pago-exitoso"> Bs0.00</p>
+      <p id="subtitulo-pago-exitoso">Presiona el botón de tu producto en la máquina para dispensar</p>
+      <button id="btn-simular-dispensado" class="btn-pagar btn-debug">Simular dispensado (debug)</button>
+    </section>
+
+    <!-- VISTA 5: Dispensando -->
+    <section id="vista-dispensando" class="vista">
+      <h1>Dispensando...</h1>
+      <p id="subtitulo-dispensando">Tu producto se está preparando</p>
+      <div class="puntos-carga"><span></span><span></span><span></span></div>
+    </section>
+
+    <!-- VISTA 6: Ocupado -->
+    <section id="vista-ocupado" class="vista">
+      <div class="icono-estado">⏳</div>
+      <h1>Sistema ocupado</h1>
+      <p>Otro cliente está siendo atendido. Intenta nuevamente en unos segundos.</p>
+      <button id="btn-reintentar" class="btn-pagar">Reintentar</button>
+    </section>
+
+    <!-- VISTA 7: Finalizado -->
+    <section id="vista-listo" class="vista">
+      <div class="icono-estado">✅</div>
+      <h1>Listo</h1>
+      <p>Retira tu producto</p>
+      <p class="monto" id="monto-final"> Bs0.00</p>
+    </section>
+
+  </div>
+
+<script>
+// ============================================================
+// ESTADO LOCAL DEL FRONTEND
+// ============================================================
+let productos = [];
+let productoElegido = null;
+let litrosElegidos = null;
+let pollingInterval = null;
+
+const acentos = ["#1877F2", "#31A24C", "#F0A73A"];
+
+// ============================================================
+// UTILIDADES DE VISTA
+// ============================================================
+function mostrarVista(idVista) {
+  document.querySelectorAll(".vista").forEach(v => v.classList.remove("activa"));
+  document.getElementById(idVista).classList.add("activa");
+}
+
+function formatoMoneda(valor) {
+  return " Bs" + Number(valor).toFixed(2);
+}
+
+function textoMetodo(metodo) {
+  if (metodo === "moneda") return "Moneda";
+  return "Ninguno seleccionado";
+}
+
+function mostrarMetodoNoDisponible(metodo) {
+  document.getElementById("metodo-actual-texto").textContent = textoMetodo(metodo);
+  mostrarVista("vista-metodo-no-disponible");
+}
+
+// ============================================================
+// SONIDOS (Web Audio API sintetizado, sin archivos externos)
+// ============================================================
+function ctxAudio() {
+  return new (window.AudioContext || window.webkitAudioContext)();
+}
+
+function tono(ctx, freq, inicio, duracion, volumen) {
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  osc.type = "sine";
+  osc.frequency.value = freq;
+  gain.gain.setValueAtTime(volumen, ctx.currentTime + inicio);
+  gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + inicio + duracion);
+  osc.connect(gain).connect(ctx.destination);
+  osc.start(ctx.currentTime + inicio);
+  osc.stop(ctx.currentTime + inicio + duracion);
+}
+
+function sonidoClick() {
+  try { const ctx = ctxAudio(); tono(ctx, 520, 0, 0.08, 0.08); } catch (e) {}
+}
+
+function sonidoConfirmacion() {
+  try {
+    const ctx = ctxAudio();
+    tono(ctx, 880, 0,    0.25, 0.15);
+    tono(ctx, 1200, 0.12, 0.25, 0.15);
+  } catch (e) {}
+}
+
+function sonidoListo() {
+  try {
+    const ctx = ctxAudio();
+    tono(ctx, 660, 0,    0.18, 0.12);
+    tono(ctx, 880, 0.15, 0.18, 0.12);
+    tono(ctx, 1100, 0.3, 0.22, 0.12);
+  } catch (e) {}
+}
+
+// ============================================================
+// CARGA DE PRODUCTOS
+// ============================================================
+async function cargarProductos() {
+  try {
+    const res = await fetch("/productos");
+    const data = await res.json();
+    productos = data.productos || [];
+    renderizarProductos();
+  } catch (e) {
+    document.getElementById("lista-productos").innerHTML =
+      "<p class='cargando'>Error cargando productos. Reintenta.</p>";
+  }
+}
+
+function renderizarProductos() {
+  const cont = document.getElementById("lista-productos");
+  cont.innerHTML = "";
+  productos.forEach((p, i) => {
+    const acento = acentos[i % acentos.length];
+    const div = document.createElement("div");
+    div.className = "tarjeta-producto";
+    div.style.setProperty("--acento", acento);
+    div.innerHTML = `
+      <span class="chip-color"></span>
+      <div>
+        <div class="nombre">${p.nombre}</div>
+        <div class="precio">${formatoMoneda(p.precioPorLitro)} por litro</div>
+      </div>
+    `;
+    div.addEventListener("click", () => {
+      sonidoClick();
+      elegirProducto(p);
+    });
+    cont.appendChild(div);
+  });
+}
+
+// ============================================================
+// FLUJO: PRODUCTO -> CANTIDAD -> PAGO
+// ============================================================
+function elegirProducto(producto) {
+  productoElegido = producto;
+  litrosElegidos = null;
+  document.getElementById("nombre-producto-elegido").textContent = producto.nombre;
+  document.getElementById("resumen-monto").classList.add("oculto");
+  document.querySelectorAll(".btn-litro").forEach(b => b.classList.remove("seleccionado"));
+  mostrarVista("vista-cantidad");
+}
+
+document.getElementById("btn-volver-productos").addEventListener("click", () => {
+  sonidoClick();
+  mostrarVista("vista-productos");
+});
+
+document.querySelectorAll(".btn-litro").forEach(btn => {
+  btn.addEventListener("click", () => {
+    sonidoClick();
+    document.querySelectorAll(".btn-litro").forEach(b => b.classList.remove("seleccionado"));
+    btn.classList.add("seleccionado");
+    litrosElegidos = parseFloat(btn.dataset.litros);
+
+    const monto = litrosElegidos * productoElegido.precioPorLitro;
+    document.getElementById("monto-total").textContent = formatoMoneda(monto);
+    document.getElementById("resumen-monto").classList.remove("oculto");
+  });
+});
+
+document.getElementById("btn-pagar").addEventListener("click", enviarPago);
+document.getElementById("btn-reintentar").addEventListener("click", () => {
+  mostrarVista("vista-productos");
+});
+document.getElementById("btn-simular-dispensado").addEventListener("click", async () => {
+  sonidoClick();
+  try {
+    await fetch("/simular-boton", { method: "POST" });
+  } catch (e) {
+    // el polling de /estado igual detectara el cambio real si llega a ocurrir
+  }
+});
+
+async function enviarPago() {
+  if (!productoElegido || !litrosElegidos) return;
+
+  mostrarVista("vista-pagando");
+
+  try {
+    const res = await fetch("/pagar", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        producto: productoElegido.id,
+        litros: litrosElegidos
+      })
+    });
+
+    if (res.status === 503) {
+      mostrarVista("vista-ocupado");
+      return;
+    }
+    if (res.status === 403) {
+      const dataErr = await res.json();
+      mostrarMetodoNoDisponible(dataErr.metodo);
+      return;
+    }
+
+    const data = await res.json();
+    if (data.status !== "ok") {
+      mostrarVista("vista-ocupado");
+      return;
+    }
+
+    iniciarPolling();
+
+  } catch (e) {
+    mostrarVista("vista-ocupado");
+  }
+}
+
+// ============================================================
+// POLLING DE ESTADO (sigue el estado real del backend)
+// ============================================================
+let ultimoEstadoVisto = null;
+
+function iniciarPolling() {
+  if (pollingInterval) clearInterval(pollingInterval);
+  pollingInterval = setInterval(consultarEstado, 1000);
+  consultarEstado();
+}
+
+async function consultarEstado() {
+  try {
+    const res = await fetch("/estado");
+    const data = await res.json();
+
+    if (data.estado === "pagando") {
+      mostrarVista("vista-pagando");
+    } else if (data.estado === "pago_exitoso") {
+      if (ultimoEstadoVisto !== "pago_exitoso") {
+        sonidoConfirmacion();
+      }
+      document.getElementById("monto-pago-exitoso").textContent = formatoMoneda(data.monto);
+      mostrarVista("vista-pago-exitoso");
+    } else if (data.estado === "dispensando") {
+      document.getElementById("subtitulo-dispensando").textContent =
+        `Tiempo restante: ${data.segundosRestantes}s`;
+      mostrarVista("vista-dispensando");
+    } else if (data.estado === "finalizado") {
+      clearInterval(pollingInterval);
+      document.getElementById("monto-final").textContent = formatoMoneda(data.monto);
+      sonidoListo();
+      mostrarVista("vista-listo");
+      setTimeout(() => {
+        productoElegido = null;
+        litrosElegidos = null;
+        mostrarVista("vista-productos");
+      }, 4000);
+    } else if (data.estado === "libre") {
+      clearInterval(pollingInterval);
+      mostrarVista("vista-productos");
+    }
+
+    ultimoEstadoVisto = data.estado;
+  } catch (e) {
+    // se reintenta en el proximo ciclo
+  }
+}
+
+// ============================================================
+// INICIO: revisa el metodo activo y el estado real antes de mostrar nada
+// ============================================================
+async function iniciar() {
+  try {
+    const res = await fetch("/estado");
+    const data = await res.json();
+
+    if (data.metodo !== "qr") {
+      mostrarMetodoNoDisponible(data.metodo);
+      return;
+    }
+
+    ultimoEstadoVisto = data.estado;
+
+    if (data.estado === "libre") {
+      mostrarVista("vista-productos");
+      cargarProductos();
+    } else {
+      // ya hay un proceso en curso (de otro cliente o refresco de pagina)
+      cargarProductos();
+      iniciarPolling();
+    }
+  } catch (e) {
+    mostrarVista("vista-productos");
+    cargarProductos();
+  }
+}
+
+iniciar();
+</script>
+</body>
+</html>

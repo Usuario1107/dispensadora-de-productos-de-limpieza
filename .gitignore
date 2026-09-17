@@ -1,0 +1,5 @@
+# Metadatos de repositorios de proyecto conservados localmente como respaldo.
+**/.git-local-backup/
+
+# Archivos generados por PlatformIO.
+**/.pio/
