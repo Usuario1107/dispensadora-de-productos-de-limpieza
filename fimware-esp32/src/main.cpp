@@ -23,9 +23,6 @@
 #endif
 
 void logSerial(String msg) {
-  debugPrint("[");
-  debugPrint("ESP32");
-  debugPrint("ms] ");
   debugPrintln(msg);
 }
 
@@ -56,9 +53,14 @@ const int PIN_FLUJO_1 = 35; // solo productos 1 y 2 tienen caudalimetro
 const int PIN_FLUJO_2 = 34;
 // Producto 3 (alta viscosidad) se controla por tiempo, sin sensor de flujo.
 
-// Calibracion del sensor de flujo (pulsos por litro, medido con jarra/probeta)
-float FACTOR_PULSOS_POR_LITRO = 530.0;
-const unsigned long TIEMPO_MAX_DISPENSADO_MS = 20000; // corte de seguridad si el sensor no marca nunca el objetivo
+// Calibracion de cada sensor de flujo por separado (pulsos por litro, medido con jarra/probeta)
+float FACTOR_PULSOS_POR_LITRO_1 = 530.0;
+float FACTOR_PULSOS_POR_LITRO_2 = 530.0;
+
+// Corte de seguridad por producto (si el sensor no marca nunca el objetivo)
+const unsigned long TIEMPO_MAX_DISPENSADO_1_MS = 20000;
+const unsigned long TIEMPO_MAX_DISPENSADO_2_MS = 20000;
+const unsigned long TIEMPO_MAX_DISPENSADO_3_MS = 20000; // producto 3 ya es por tiempo fijo, este es margen extra
 
 // WIFI SOFTAP (editable) - se enciende solo bajo demanda (metodo QR)
 const char* AP_SSID     = "ESP32-DEV";
@@ -162,7 +164,7 @@ int   costoSel = 0;
 const unsigned long TIEMPO_PAGO_MS = 5000;   // simulacion de pago QR
 const unsigned long TIEMPO_DISP_MS = 10000;  // solo para el producto 3 (sin sensor de flujo)
 const unsigned long TIEMPO_FIN_MS  = 5000;   // pantalla "retire su producto"
-const unsigned long TIEMPO_INACTIVIDAD_MS = 2UL * 60UL * 1000UL; // 3 min sin actividad -> deep sleep
+const unsigned long TIEMPO_INACTIVIDAD_MS = 1UL * 60UL * 1000UL; // 3 min sin actividad -> deep sleep
 
 unsigned long tInicioPagoQR = 0;
 unsigned long tInicioDisp   = 0;
@@ -333,11 +335,11 @@ bool iniciarDispensado(const char* origen) {
   float litros = cantidadesPermitidas[volSel - 1];
   if (prodSel == 1) {
     pulsosFlujo1 = 0;
-    pulsosObjetivoActual = (unsigned long)(litros * FACTOR_PULSOS_POR_LITRO + 0.5);
+    pulsosObjetivoActual = (unsigned long)(litros * FACTOR_PULSOS_POR_LITRO_1 + 0.5);
     logSerial("[DISPENSAR] Corte por FLUJO | objetivo: " + String(pulsosObjetivoActual) + " pulsos");
   } else if (prodSel == 2) {
     pulsosFlujo2 = 0;
-    pulsosObjetivoActual = (unsigned long)(litros * FACTOR_PULSOS_POR_LITRO + 0.5);
+    pulsosObjetivoActual = (unsigned long)(litros * FACTOR_PULSOS_POR_LITRO_2 + 0.5);
     logSerial("[DISPENSAR] Corte por FLUJO | objetivo: " + String(pulsosObjetivoActual) + " pulsos");
   } else {
     pulsosObjetivoActual = 0;
@@ -713,7 +715,11 @@ void actualizarEstadoTiempos() {
       completado = (transcurrido >= TIEMPO_DISP_MS); // producto 3, sin sensor
     }
 
-    if (!completado && transcurrido >= TIEMPO_MAX_DISPENSADO_MS) {
+    unsigned long tiempoMax = (prodSel == 1) ? TIEMPO_MAX_DISPENSADO_1_MS
+                            : (prodSel == 2) ? TIEMPO_MAX_DISPENSADO_2_MS
+                            : TIEMPO_MAX_DISPENSADO_3_MS;
+
+    if (!completado && transcurrido >= tiempoMax) {
       completado = true;
       logSerial("[DISPENSAR][ALERTA] Corte de SEGURIDAD por tiempo maximo - revisar sensor de flujo, no llego al objetivo");
     }
