@@ -107,7 +107,6 @@ h1 {
   font-size: 0.9rem;
 }
 
-/* --- Lista de productos --- */
 .lista-productos {
   display: flex;
   flex-direction: column;
@@ -149,7 +148,6 @@ h1 {
   margin-top: 2px;
 }
 
-/* --- Boton volver --- */
 .btn-volver {
   background: none;
   border: none;
@@ -160,7 +158,6 @@ h1 {
   font-weight: 600;
 }
 
-/* --- Cantidades --- */
 .lista-cantidades {
   display: grid;
   grid-template-columns: 1fr 1fr 1fr;
@@ -224,19 +221,6 @@ h1 {
   background: var(--primary-dark);
 }
 
-.btn-debug {
-  margin-top: 16px;
-  background: transparent;
-  border: 2px dashed var(--line);
-  color: var(--muted);
-  font-weight: 600;
-}
-
-.btn-debug:active {
-  background: #F7F9FC;
-}
-
-/* --- Loader liviano (solo 3 puntos, bajo costo de render) --- */
 .puntos-carga {
   display: flex;
   justify-content: center;
@@ -271,7 +255,6 @@ h1 {
   font-size: 0.9rem;
 }
 
-/* --- Pago exitoso --- */
 .icono-check {
   width: 52px;
   height: 52px;
@@ -292,7 +275,6 @@ h1 {
   margin: 6px 0 14px;
 }
 
-/* --- Vista ocupado / listo --- */
 #vista-ocupado p,
 #vista-listo p {
   color: var(--muted);
@@ -311,14 +293,14 @@ h1 {
 
     <div class="marca"><span class="punto"></span><span>Dispensador de Detergente</span></div>
 
-    <!-- VISTA 0: Metodo de pago no disponible -->
+    <!-- Metodo QR no seleccionado en la maquina -->
     <section id="vista-metodo-no-disponible" class="vista">
       <h1>Pago por QR no disponible</h1>
       <p class="subrayo">Seleccione este método desde el panel de la máquina</p>
       <div class="aviso">Método actual: <strong id="metodo-actual-texto">-</strong></div>
     </section>
 
-    <!-- VISTA 1: Seleccion de producto -->
+    <!-- Elegir producto -->
     <section id="vista-productos" class="vista">
       <h1>Elige tu detergente</h1>
       <p class="subrayo">Toca una opción para continuar</p>
@@ -327,7 +309,7 @@ h1 {
       </div>
     </section>
 
-    <!-- VISTA 2: Seleccion de cantidad -->
+    <!-- Elegir cantidad -->
     <section id="vista-cantidad" class="vista">
       <button class="btn-volver" id="btn-volver-productos">&larr; Volver</button>
       <h1 id="nombre-producto-elegido">Producto</h1>
@@ -339,35 +321,34 @@ h1 {
       </div>
       <div id="resumen-monto" class="resumen-monto oculto">
         <p class="etiqueta-monto">Total a pagar</p>
-        <p class="monto" id="monto-total"> Bs0.00</p>
+        <p class="monto" id="monto-total">Bs 0</p>
         <button id="btn-pagar" class="btn-pagar">Pagar</button>
       </div>
     </section>
 
-    <!-- VISTA 3: Simulando pago -->
+    <!-- Simulando pago -->
     <section id="vista-pagando" class="vista">
       <h1>Procesando pago...</h1>
       <p id="subtitulo-pagando">Un momento por favor</p>
       <div class="puntos-carga"><span></span><span></span><span></span></div>
     </section>
 
-    <!-- VISTA 4: Pago exitoso, esperando dispensado -->
+    <!-- Pago exitoso, esperando la boquilla -->
     <section id="vista-pago-exitoso" class="vista">
       <div class="icono-check">✓</div>
       <h1>Pago exitoso</h1>
-      <p class="monto-chico" id="monto-pago-exitoso"> Bs0.00</p>
+      <p class="monto-chico" id="monto-pago-exitoso">Bs 0</p>
       <p id="subtitulo-pago-exitoso">Presiona el botón de tu producto en la máquina para dispensar</p>
-      <button id="btn-simular-dispensado" class="btn-pagar btn-debug">Simular dispensado (debug)</button>
     </section>
 
-    <!-- VISTA 5: Dispensando -->
+    <!-- Dispensando (corta el sensor de flujo, no hay cuenta regresiva) -->
     <section id="vista-dispensando" class="vista">
       <h1>Dispensando...</h1>
-      <p id="subtitulo-dispensando">Tu producto se está preparando</p>
+      <p>Tu producto se está preparando</p>
       <div class="puntos-carga"><span></span><span></span><span></span></div>
     </section>
 
-    <!-- VISTA 6: Ocupado -->
+    <!-- Sistema ocupado -->
     <section id="vista-ocupado" class="vista">
       <div class="icono-estado">⏳</div>
       <h1>Sistema ocupado</h1>
@@ -375,37 +356,34 @@ h1 {
       <button id="btn-reintentar" class="btn-pagar">Reintentar</button>
     </section>
 
-    <!-- VISTA 7: Finalizado -->
+    <!-- Listo -->
     <section id="vista-listo" class="vista">
       <div class="icono-estado">✅</div>
       <h1>Listo</h1>
       <p>Retira tu producto</p>
-      <p class="monto" id="monto-final"> Bs0.00</p>
+      <p class="monto" id="monto-final">Bs 0</p>
     </section>
 
   </div>
 
 <script>
-// ============================================================
-// ESTADO LOCAL DEL FRONTEND
-// ============================================================
+// Estado local del frontend
 let productos = [];
 let productoElegido = null;
 let litrosElegidos = null;
 let pollingInterval = null;
+let ultimoEstadoVisto = null;
 
 const acentos = ["#1877F2", "#31A24C", "#F0A73A"];
 
-// ============================================================
-// UTILIDADES DE VISTA
-// ============================================================
 function mostrarVista(idVista) {
   document.querySelectorAll(".vista").forEach(v => v.classList.remove("activa"));
   document.getElementById(idVista).classList.add("activa");
 }
 
+// Precios enteros en Bs, sin decimales
 function formatoMoneda(valor) {
-  return " Bs" + Number(valor).toFixed(2);
+  return "Bs " + Math.round(valor);
 }
 
 function textoMetodo(metodo) {
@@ -418,9 +396,7 @@ function mostrarMetodoNoDisponible(metodo) {
   mostrarVista("vista-metodo-no-disponible");
 }
 
-// ============================================================
-// SONIDOS (Web Audio API sintetizado, sin archivos externos)
-// ============================================================
+// Sonidos sintetizados, sin archivos externos
 function ctxAudio() {
   return new (window.AudioContext || window.webkitAudioContext)();
 }
@@ -444,7 +420,7 @@ function sonidoClick() {
 function sonidoConfirmacion() {
   try {
     const ctx = ctxAudio();
-    tono(ctx, 880, 0,    0.25, 0.15);
+    tono(ctx, 880, 0, 0.25, 0.15);
     tono(ctx, 1200, 0.12, 0.25, 0.15);
   } catch (e) {}
 }
@@ -452,15 +428,12 @@ function sonidoConfirmacion() {
 function sonidoListo() {
   try {
     const ctx = ctxAudio();
-    tono(ctx, 660, 0,    0.18, 0.12);
+    tono(ctx, 660, 0, 0.18, 0.12);
     tono(ctx, 880, 0.15, 0.18, 0.12);
     tono(ctx, 1100, 0.3, 0.22, 0.12);
   } catch (e) {}
 }
 
-// ============================================================
-// CARGA DE PRODUCTOS
-// ============================================================
 async function cargarProductos() {
   try {
     const res = await fetch("/productos");
@@ -496,9 +469,6 @@ function renderizarProductos() {
   });
 }
 
-// ============================================================
-// FLUJO: PRODUCTO -> CANTIDAD -> PAGO
-// ============================================================
 function elegirProducto(producto) {
   productoElegido = producto;
   litrosElegidos = null;
@@ -529,14 +499,6 @@ document.querySelectorAll(".btn-litro").forEach(btn => {
 document.getElementById("btn-pagar").addEventListener("click", enviarPago);
 document.getElementById("btn-reintentar").addEventListener("click", () => {
   mostrarVista("vista-productos");
-});
-document.getElementById("btn-simular-dispensado").addEventListener("click", async () => {
-  sonidoClick();
-  try {
-    await fetch("/simular-boton", { method: "POST" });
-  } catch (e) {
-    // el polling de /estado igual detectara el cambio real si llega a ocurrir
-  }
 });
 
 async function enviarPago() {
@@ -577,11 +539,7 @@ async function enviarPago() {
   }
 }
 
-// ============================================================
-// POLLING DE ESTADO (sigue el estado real del backend)
-// ============================================================
-let ultimoEstadoVisto = null;
-
+// Polling: sigue el estado real que manda el ESP32
 function iniciarPolling() {
   if (pollingInterval) clearInterval(pollingInterval);
   pollingInterval = setInterval(consultarEstado, 1000);
@@ -602,8 +560,6 @@ async function consultarEstado() {
       document.getElementById("monto-pago-exitoso").textContent = formatoMoneda(data.monto);
       mostrarVista("vista-pago-exitoso");
     } else if (data.estado === "dispensando") {
-      document.getElementById("subtitulo-dispensando").textContent =
-        `Tiempo restante: ${data.segundosRestantes}s`;
       mostrarVista("vista-dispensando");
     } else if (data.estado === "finalizado") {
       clearInterval(pollingInterval);
@@ -626,9 +582,7 @@ async function consultarEstado() {
   }
 }
 
-// ============================================================
-// INICIO: revisa el metodo activo y el estado real antes de mostrar nada
-// ============================================================
+// Al cargar: revisa metodo activo y estado real antes de mostrar nada
 async function iniciar() {
   try {
     const res = await fetch("/estado");
@@ -645,7 +599,6 @@ async function iniciar() {
       mostrarVista("vista-productos");
       cargarProductos();
     } else {
-      // ya hay un proceso en curso (de otro cliente o refresco de pagina)
       cargarProductos();
       iniciarPolling();
     }

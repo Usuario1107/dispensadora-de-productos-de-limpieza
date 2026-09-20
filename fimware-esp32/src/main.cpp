@@ -1,18 +1,17 @@
-  
-// DISPENSADOR DE DETERGENTES - ESP32
-// Modulos integrados: Servidor Web (pago QR simulado), Monedero, LCD 20x4,
-// Menu de navegacion, Boquillas de dispensado, Sensores de flujo (declarados)
-  
+// DISPENSADOR DE DETERGENTES - ESP32 (controlador principal)
+// El ESP32 es la UNICA autoridad de negocio: saldo, metodo de pago, validacion
+// de compra, estados. El Arduino Uno + TFT solo muestra lo que este le manda
+// y reporta toques. Ver protocolo UART al final del archivo.
 #include <Arduino.h>
 #include <WiFi.h>
 #include <DNSServer.h>
 #include <LittleFS.h>
 #include <ESPAsyncWebServer.h>
 #include <ArduinoJson.h>
-#include <Wire.h>
-#include <LiquidCrystal_I2C.h>
+#include "esp_sleep.h"
+#include "driver/rtc_io.h"
 
-// DEBUG / SERIAL
+// DEBUG / SERIAL - siempre activo por ahora, se apaga para produccion final
 #define DEBUG true
 
 #if DEBUG
@@ -24,96 +23,110 @@
 #endif
 
 void logSerial(String msg) {
-  debugPrintln("[SISTEMA] " + msg);
+  debugPrint("[");
+  debugPrint("ESP32");
+  debugPrint("ms] ");
+  debugPrintln(msg);
 }
 
-// MAPA DE PINES (fijo del sistema -> MAYUSCULAS)
+// MAPA DE PINES
 const int PIN_COIN        = 18;
 const int PIN_COIN_SET    = 19;
 
-const int PIN_BTN_MENU_1  = 26;
-const int PIN_BTN_MENU_2  = 27;
-const int PIN_BTN_MENU_3  = 14;
-const int PIN_BTN_MENU_4  = 13;
-
-const int PIN_BTN_BOQ_1   = 32;
-const int PIN_BTN_BOQ_2   = 33;
-const int PIN_BTN_BOQ_3   = 25;
+// UART2 hacia el HMI (Arduino Uno + TFT). RX2 recibe del HMI, TX2 le envia.
+const int PIN_HMI_RX2 = 21;
+const int PIN_HMI_TX2 = 22;
+const long HMI_BAUDIOS = 9600;
 
 const int PIN_PLC_BOMBA_1 = 17;
 const int PIN_PLC_BOMBA_2 = 16;
 const int PIN_PLC_BOMBA_3 = 4;
 
-// Sensores de flujo YF-S201 (declarados, sin logica de corte todavia:
-// aun no hay manguera conectada). Requieren pull-up externo de 10k a 3.3V.
-const int PIN_FLUJO_1 = 35;
-const int PIN_FLUJO_2 = 34;
-const int PIN_FLUJO_3 = 36; // VP
+const int PIN_BTN_BOQ_1   = 32;
+const int PIN_BTN_BOQ_2   = 33;
+const int PIN_BTN_BOQ_3   = 25;
 
-// WIFI SOFTAP (editable)
+const int PIN_NIVEL_1 = 26; // flotador tanque 1 (LOW = vacio, HIGH = con liquido)
+const int PIN_NIVEL_2 = 27;
+const int PIN_NIVEL_3 = 14;
+
+const int PIN_BOTON_DESPERTAR = 13;
+
+const int PIN_FLUJO_1 = 35; // solo productos 1 y 2 tienen caudalimetro
+const int PIN_FLUJO_2 = 34;
+// Producto 3 (alta viscosidad) se controla por tiempo, sin sensor de flujo.
+
+// Calibracion del sensor de flujo (pulsos por litro, medido con jarra/probeta)
+float FACTOR_PULSOS_POR_LITRO = 530.0;
+const unsigned long TIEMPO_MAX_DISPENSADO_MS = 20000; // corte de seguridad si el sensor no marca nunca el objetivo
+
+// WIFI SOFTAP (editable) - se enciende solo bajo demanda (metodo QR)
 const char* AP_SSID     = "ESP32-DEV";
 const char* AP_PASSWORD = "1234567890";
 IPAddress AP_IP(192, 168, 4, 1);
 IPAddress AP_GATEWAY(192, 168, 4, 1);
 IPAddress AP_SUBNET(255, 255, 255, 0);
 
-// PRODUCTOS (fuente unica: la usan tanto el LCD como la web)
-// precioPorLitro con decimales (ej. 4.50 Bs/L)
-struct ProductoConfig {
+bool servidorActivo = false;
+
+// PRODUCTOS - precios enteros y pares (Bs), confirmados
+struct Producto {
   int id;
   String nombre;
-  float precioPorLitro;
+  int precioPorLitro;
 };
 
-ProductoConfig productos[3] = {
-  {1, "Producto 1", 10.00},
-  {2, "Producto 2", 6.00},
-  {3, "Producto 3", 8.00}
+Producto productos[3] = {
+  {1, "Producto 1", 4},
+  {2, "Producto 2", 6},
+  {3, "Producto 3", 8}
 };
 
-// Cantidades permitidas (litros) - indice 0=0.5L, 1=1L, 2=2L
 const float cantidadesPermitidas[3] = {0.5, 1.0, 2.0};
 
-ProductoConfig* buscarProducto(int id) {
+bool tanqueVacio[3] = {false, false, false}; // actualizado por los flotadores de nivel
+
+Producto* buscarProducto(int id) {
   for (int i = 0; i < 3; i++) {
     if (productos[i].id == id) return &productos[i];
   }
   return nullptr;
 }
 
-// CONFIGURACION DE MONEDAS
-#define TIEMPO_CONTEO 1000
+int calcularCosto(Producto* p, float litros) {
+  return (int)round(p->precioPorLitro * litros);
+}
+
+// MONEDERO (denominaciones 1, 2, 5 Bs - sin vuelto)
+#define TIEMPO_CONTEO_MONEDA 1000
 #define PULSOS_1BS 2
 #define PULSOS_2BS 4
 #define PULSOS_5BS 7
 
 volatile int pulsosContados = 0;
-volatile bool hayPulso = false;
-bool conteoEnProceso = false;
-unsigned long tInicioConteo = 0;
+volatile bool hayPulsoMoneda = false;
+bool conteoMonedaEnProceso = false;
+unsigned long tInicioConteoMoneda = 0;
 
-// LCD 20x4
-LiquidCrystal_I2C lcd(0x27, 20, 4);
+int saldo = 0;
+bool monederoHabilitado = false; // lo controla la FSM segun el estado
 
 // MAQUINA DE ESTADOS
-enum EstadoFSM {
-  EST_REPOSO,
-  EST_PRECIOS,
-  EST_QR_ESPERA,
-  EST_QR_PAGANDO,     // simulacion de pago online (5s) - AGREGADO en la integracion
-  EST_QR_PAGADO,
-  EST_MONEDA_INGRESO,
-  EST_SELEC_PROD,
-  EST_SELEC_VOL,
-  EST_CONFIRMACION,
-  EST_DISPENSANDO,
-  EST_FINALIZADO      // "retire su producto" - AGREGADO en la integracion
+enum EstadoSistema {
+  REPOSO,
+  QR_ESPERA,
+  QR_PAGANDO,       // simulacion de pago online (5s)
+  PAGO_EXITOSO,     // compartido por QR y moneda, esperando boton de boquilla
+  MONEDA_INGRESO,
+  SEL_PROD,
+  SEL_VOL,
+  CONFIRMACION,
+  DISPENSANDO,
+  FINALIZADO
 };
 
-EstadoFSM estadoActual = EST_REPOSO;
-EstadoFSM estadoAnterior = (EstadoFSM)-1;
+EstadoSistema estadoActual = REPOSO;
 
-// Metodo de pago activo (lo controla el panel/LCD; la web solo lo lee)
 enum MetodoPago { METODO_NINGUNO, METODO_QR, METODO_MONEDA };
 MetodoPago metodoActivo = METODO_NINGUNO;
 
@@ -125,79 +138,96 @@ const char* nombreMetodo(MetodoPago m) {
   }
 }
 
-// Datos de la compra en curso (compartidos por ambos flujos: QR y Moneda)
-float saldo = 0;
-float saldoAnt = -1;
-int   prodSel = 0;
-int   volSel = 0;      // 1: 0.5L, 2: 1L, 3: 2L
-float costoSel = 0;
+const char* nombreEstado(EstadoSistema e) {
+  switch (e) {
+    case REPOSO:         return "REPOSO";
+    case QR_ESPERA:       return "QR_ESPERA";
+    case QR_PAGANDO:      return "QR_PAGANDO";
+    case PAGO_EXITOSO:    return "PAGO_EXITOSO";
+    case MONEDA_INGRESO:  return "MONEDA_INGRESO";
+    case SEL_PROD:        return "SEL_PROD";
+    case SEL_VOL:         return "SEL_VOL";
+    case CONFIRMACION:    return "CONFIRMACION";
+    case DISPENSANDO:     return "DISPENSANDO";
+    case FINALIZADO:      return "FINALIZADO";
+    default:              return "?";
+  }
+}
 
-// Tiempos de cada fase
-const unsigned long TIEMPO_PAGO_MS   = 5000;   // simulacion de pago QR
-const unsigned long TIEMPO_DISP_MS   = 10000;  // dispensado fijo (por ahora, sin sensor)
-const unsigned long TIEMPO_FIN_MS    = 5000;   // pantalla "retire su producto"
+// Datos de la compra en curso (compartidos por QR y moneda)
+int   prodSel  = 0;
+int   volSel   = 0;   // 1: 0.5L, 2: 1L, 3: 2L
+int   costoSel = 0;
+
+const unsigned long TIEMPO_PAGO_MS = 5000;   // simulacion de pago QR
+const unsigned long TIEMPO_DISP_MS = 10000;  // solo para el producto 3 (sin sensor de flujo)
+const unsigned long TIEMPO_FIN_MS  = 5000;   // pantalla "retire su producto"
+const unsigned long TIEMPO_INACTIVIDAD_MS = 2UL * 60UL * 1000UL; // 3 min sin actividad -> deep sleep
 
 unsigned long tInicioPagoQR = 0;
 unsigned long tInicioDisp   = 0;
 unsigned long tInicioFin    = 0;
-int segRestantes  = 10;
-int segAnteriores = -1;
+unsigned long ultimaActividad = 0;
 
-// Debounce de botones (un solo timestamp global, un usuario a la vez)
+unsigned long pulsosObjetivoActual = 0; // calculado al iniciar cada dispensado (productos 1 y 2)
+
+unsigned long tUltimoHeartbeat = 0;
+const unsigned long HEARTBEAT_MS = 2000; // reenvia el estado actual siempre, por si el HMI se reinicio
+
+// Botones de boquilla (polling con debounce)
+bool antBoq1 = HIGH, antBoq2 = HIGH, antBoq3 = HIGH;
 unsigned long tUltimoBoton = 0;
 const unsigned long DEBOUNCE_MS = 250;
 
-bool antMenu1 = HIGH, antMenu2 = HIGH, antMenu3 = HIGH, antMenu4 = HIGH;
-bool antBoq1 = HIGH, antBoq2 = HIGH, antBoq3 = HIGH;
+// Sensores de nivel (antirrebote por ventana de tiempo: 3s sostenido en LOW)
+unsigned long tCandidatoVacio[3] = {0, 0, 0};
+bool candidatoVacioActivo[3] = {false, false, false};
+const unsigned long TIEMPO_CONFIRMAR_VACIO_MS = 3000;
 
-// Sensores de flujo: solo conteo y log por ahora, sin corte por pulsos
+// Sensores de flujo (solo conteo/log por ahora, sin corte por pulsos)
 volatile unsigned long pulsosFlujo1 = 0;
 volatile unsigned long pulsosFlujo2 = 0;
-volatile unsigned long pulsosFlujo3 = 0;
 
-// OBJETOS DEL SERVIDOR WEB
+// OBJETOS DEL SERVIDOR WEB Y HMI
 DNSServer dnsServer;
 AsyncWebServer server(80);
+HardwareSerial& hmiSerial = Serial2;
+String bufferHMI = "";
 
 // PROTOTIPOS
 void IRAM_ATTR ISR_Moneda();
 void IRAM_ATTR ISR_Flujo1();
 void IRAM_ATTR ISR_Flujo2();
-void IRAM_ATTR ISR_Flujo3();
-int evaluarPulsos(int p);
+int evaluarPulsosMoneda(int p);
 void procesarMoneda();
-void renderLCD(bool forzarCls);
-void leerNavegacion(int btn);
-void leerBoquillas(int boq);
+void cambiarEstado(EstadoSistema nuevo);
+void enviarEstadoHMI();
+void enviarComandoHMI(String cmd);
+void leerSerialHMI();
+void manejarToqueHMI(int btn);
+void chequearBotonesBoquilla();
+bool puedeDormir();
+void entrarDeepSleep();
+void chequearSensoresNivel();
+void iniciarServidorWeb();
+void detenerServidorWeb();
+bool iniciarDispensado(const char* origen);
 void apagarBombas();
 void activarBomba(int prod);
-String pad20(String txt);
-String getVolText(int vol);
-int volSelDeLitros(float litros);
 void actualizarEstadoTiempos();
+void actualizarMonederoHabilitado();
+String mascaraDisponibilidad();
 
-  
-// HELPERS DE TEXTO
-String pad20(String txt) {
-  while (txt.length() < 20) txt += " ";
-  return txt.substring(0, 20);
+// CAMBIO DE ESTADO (centralizado, siempre loguea y siempre avisa al HMI)
+void cambiarEstado(EstadoSistema nuevo) {
+  logSerial("[ESTADO] " + String(nombreEstado(estadoActual)) + " -> " + String(nombreEstado(nuevo)));
+  estadoActual = nuevo;
+  ultimaActividad = millis(); // cualquier cambio de estado cuenta como actividad
+  actualizarMonederoHabilitado();
+  enviarEstadoHMI();
 }
 
-String getVolText(int vol) {
-  if (vol == 1) return "0.5L";
-  if (vol == 2) return "1L";
-  if (vol == 3) return "2L";
-  return "0L";
-}
-
-int volSelDeLitros(float litros) {
-  if (fabs(litros - 0.5) < 0.01) return 1;
-  if (fabs(litros - 1.0) < 0.01) return 2;
-  if (fabs(litros - 2.0) < 0.01) return 3;
-  return 0;
-}
-
-// SALIDAS AL PLC (BOMBAS)
+// SALIDAS AL PLC (BOMBAS) - activo en HIGH
 void apagarBombas() {
   digitalWrite(PIN_PLC_BOMBA_1, LOW);
   digitalWrite(PIN_PLC_BOMBA_2, LOW);
@@ -209,321 +239,348 @@ void activarBomba(int prod) {
   if (prod == 1)      digitalWrite(PIN_PLC_BOMBA_1, HIGH);
   else if (prod == 2) digitalWrite(PIN_PLC_BOMBA_2, HIGH);
   else if (prod == 3) digitalWrite(PIN_PLC_BOMBA_3, HIGH);
+  logSerial("[PLC] Bomba " + String(prod) + " activada (HIGH)");
 }
 
-// RENDERIZADO LCD 20x4
-void renderLCD(bool forzarCls) {
-  if (forzarCls || estadoActual != estadoAnterior) {
-    lcd.clear();
-    estadoAnterior = estadoActual;
-    saldoAnt = -1;
-
-    switch (estadoActual) {
-      case EST_REPOSO:
-        digitalWrite(PIN_COIN_SET, LOW);
-        lcd.setCursor(0, 0); lcd.print("       INICIO       ");
-        lcd.setCursor(0, 1); lcd.print("1 Pago por QR       ");
-        lcd.setCursor(0, 2); lcd.print("2 Pago por Monedas  ");
-        lcd.setCursor(0, 3); lcd.print("3 Ver Precios       ");
-        break;
-
-      case EST_PRECIOS:
-        digitalWrite(PIN_COIN_SET, LOW);
-        lcd.setCursor(0, 0); lcd.print(pad20(productos[0].nombre + ": " + String(productos[0].precioPorLitro, 2) + " Bs/L"));
-        lcd.setCursor(0, 1); lcd.print(pad20(productos[1].nombre + ": " + String(productos[1].precioPorLitro, 2) + " Bs/L"));
-        lcd.setCursor(0, 2); lcd.print(pad20(productos[2].nombre + ": " + String(productos[2].precioPorLitro, 2) + " Bs/L"));
-        lcd.setCursor(0, 3); lcd.print("4 Inicio            ");
-        break;
-
-      case EST_QR_ESPERA:
-        digitalWrite(PIN_COIN_SET, LOW);
-        lcd.setCursor(0, 0); lcd.print("    PAGO CON QR     ");
-        lcd.setCursor(0, 1); lcd.print("Escanee con celular ");
-        lcd.setCursor(0, 2); lcd.print("1 Simular Pago(DBG) ");
-        lcd.setCursor(0, 3); lcd.print("4 Cancelar          ");
-        break;
-
-      case EST_QR_PAGANDO:
-        digitalWrite(PIN_COIN_SET, LOW);
-        lcd.setCursor(0, 0); lcd.print("  PROCESANDO PAGO   ");
-        lcd.setCursor(0, 1); lcd.print("Espere un momento...");
-        break;
-
-      case EST_QR_PAGADO:
-        digitalWrite(PIN_COIN_SET, LOW);
-        lcd.setCursor(0, 0); lcd.print("    PAGO EXITOSO    ");
-        lcd.setCursor(0, 1); lcd.print("Puede dispensar     ");
-        lcd.setCursor(0, 2); lcd.print(pad20("su producto P" + String(prodSel)));
-        lcd.setCursor(0, 3); lcd.print(pad20("Presione boquilla " + String(prodSel)));
-        break;
-
-      case EST_MONEDA_INGRESO:
-        digitalWrite(PIN_COIN_SET, HIGH);
-        lcd.setCursor(0, 0); lcd.print("MODO MONEDA  S:     ");
-        lcd.setCursor(0, 1); lcd.print("Inserte monedas...  ");
-        lcd.setCursor(0, 2); lcd.print("                    ");
-        lcd.setCursor(0, 3);
-        if (saldo == 0) lcd.print("4 Atras             ");
-        else            lcd.print("4 Comprar           ");
-        break;
-
-      case EST_SELEC_PROD:
-        digitalWrite(PIN_COIN_SET, HIGH);
-        lcd.setCursor(0, 0); lcd.print("1 " + productos[0].nombre);
-        lcd.setCursor(13, 0); lcd.print("S:    ");
-        lcd.setCursor(0, 1); lcd.print(pad20("2 " + productos[1].nombre));
-        lcd.setCursor(0, 2); lcd.print(pad20("3 " + productos[2].nombre));
-        lcd.setCursor(0, 3); lcd.print("            4 Atras");
-        break;
-
-      case EST_SELEC_VOL: {
-        digitalWrite(PIN_COIN_SET, HIGH);
-        float pBase = productos[prodSel - 1].precioPorLitro;
-        lcd.setCursor(0, 0); lcd.print("PROD P" + String(prodSel));
-        lcd.setCursor(13, 0); lcd.print("S:    ");
-        lcd.setCursor(0, 1); lcd.print(pad20("1:0.5L(" + String(pBase * 0.5, 2) + ") 2:1L(" + String(pBase, 2) + ")"));
-        lcd.setCursor(0, 2); lcd.print(pad20("3:2L(" + String(pBase * 2.0, 2) + "Bs)"));
-        lcd.setCursor(0, 3); lcd.print("4 Atras             ");
-        break;
-      }
-
-      case EST_CONFIRMACION:
-        digitalWrite(PIN_COIN_SET, LOW);
-        lcd.setCursor(0, 0); lcd.print("CONFIRMAR");
-        lcd.setCursor(13, 0); lcd.print("S:    ");
-        lcd.setCursor(0, 1); lcd.print(pad20("Prod:P" + String(prodSel) + " | Vol:" + getVolText(volSel)));
-        lcd.setCursor(0, 2); lcd.print("Costo: ");
-        lcd.print(String(costoSel, 2));
-        lcd.print(" Bs    ");
-        lcd.setCursor(0, 3); lcd.print("1 Aceptar   4 Atras ");
-        break;
-
-      case EST_DISPENSANDO:
-        digitalWrite(PIN_COIN_SET, LOW);
-        lcd.setCursor(0, 0); lcd.print("    DISPENSANDO     ");
-        lcd.setCursor(0, 1); lcd.print(pad20("Sirviendo Prod P" + String(prodSel)));
-        lcd.setCursor(0, 2); lcd.print("Por favor espere... ");
-        lcd.setCursor(0, 3); lcd.print("Tiempo: 10s         ");
-        break;
-
-      case EST_FINALIZADO:
-        digitalWrite(PIN_COIN_SET, LOW);
-        lcd.setCursor(0, 0); lcd.print("       LISTO!       ");
-        lcd.setCursor(0, 1); lcd.print("Retire su producto  ");
-        lcd.setCursor(0, 2); lcd.print(pad20("Total: " + String(costoSel, 2) + " Bs"));
-        break;
-    }
-  }
-
-  // Refresco dinamico del saldo (sin recargar toda la pantalla)
-  if (saldo != saldoAnt) {
-    saldoAnt = saldo;
-    if (estadoActual == EST_MONEDA_INGRESO || estadoActual == EST_SELEC_PROD ||
-        estadoActual == EST_SELEC_VOL || estadoActual == EST_CONFIRMACION) {
-      lcd.setCursor(15, 0);
-      lcd.print(String(saldo, 1) + "Bs");
-    }
-    if (estadoActual == EST_MONEDA_INGRESO) {
-      lcd.setCursor(0, 3);
-      if (saldo > 0) lcd.print("4 Comprar           ");
-      else           lcd.print("4 Atras             ");
-    }
-  }
-
-  if (estadoActual == EST_DISPENSANDO) {
-    lcd.setCursor(8, 3);
-    if (segRestantes < 10) lcd.print("0");
-    lcd.print(segRestantes); lcd.print("s ");
-  }
-}
-
-// INTERRUPCIONES
+// MONEDERO
 void IRAM_ATTR ISR_Moneda() {
   pulsosContados++;
-  hayPulso = true;
+  hayPulsoMoneda = true;
 }
 
-void IRAM_ATTR ISR_Flujo1() { pulsosFlujo1++; }
-void IRAM_ATTR ISR_Flujo2() { pulsosFlujo2++; }
-void IRAM_ATTR ISR_Flujo3() { pulsosFlujo3++; }
-
-int evaluarPulsos(int p) {
+int evaluarPulsosMoneda(int p) {
   if (p == PULSOS_1BS) return 1;
   if (p == PULSOS_2BS) return 2;
   if (p == PULSOS_5BS) return 5;
   return 0;
 }
 
+void actualizarMonederoHabilitado() {
+  monederoHabilitado = (estadoActual == MONEDA_INGRESO || estadoActual == SEL_PROD || estadoActual == SEL_VOL);
+  digitalWrite(PIN_COIN_SET, monederoHabilitado ? HIGH : LOW);
+  logSerial(String("[MONEDERO] SET -> ") + (monederoHabilitado ? "HABILITADO (HIGH)" : "BLOQUEADO (LOW)"));
+}
+
 void procesarMoneda() {
   detachInterrupt(digitalPinToInterrupt(PIN_COIN));
   int p = pulsosContados;
   pulsosContados = 0;
-  conteoEnProceso = false;
-  hayPulso = false;
+  conteoMonedaEnProceso = false;
+  hayPulsoMoneda = false;
 
-  if (estadoActual != EST_MONEDA_INGRESO && estadoActual != EST_SELEC_PROD && estadoActual != EST_SELEC_VOL) {
-    digitalWrite(PIN_COIN_SET, LOW);
+  if (!monederoHabilitado) {
+    logSerial("[MONEDERO] Pulso ignorado, estado no valido para cobro");
     attachInterrupt(digitalPinToInterrupt(PIN_COIN), ISR_Moneda, FALLING);
-    logSerial("Pulso ignorado: estado no valido para cobro");
     return;
   }
 
   digitalWrite(PIN_COIN_SET, HIGH);
   attachInterrupt(digitalPinToInterrupt(PIN_COIN), ISR_Moneda, FALLING);
 
-  int valor = evaluarPulsos(p);
+  int valor = evaluarPulsosMoneda(p);
   if (valor > 0) {
     saldo += valor;
-    logSerial("Moneda aceptada: " + String(valor) + " Bs | Saldo total: " + String(saldo, 2) + " Bs");
-    renderLCD(false);
+    ultimaActividad = millis();
+    logSerial("[MONEDERO] Moneda aceptada: " + String(valor) + " Bs | Saldo: " + String(saldo) + " Bs");
+    enviarComandoHMI("SALDO:" + String(saldo));
   } else {
-    logSerial("Error: moneda no reconocida (pulsos: " + String(p) + ")");
+    logSerial("[MONEDERO] Moneda no reconocida (pulsos: " + String(p) + ")");
   }
 }
 
-// NAVEGACION DEL MENU
-void leerNavegacion(int btn) {
-  logSerial("Boton menu presionado: [" + String(btn) + "]");
+// SENSORES DE FLUJO (solo conteo/log, sin corte todavia)
+void IRAM_ATTR ISR_Flujo1() { pulsosFlujo1++; }
+void IRAM_ATTR ISR_Flujo2() { pulsosFlujo2++; }
+
+// SENSORES DE NIVEL (flotadores, antirrebote por ventana de 3s)
+void chequearSensoresNivel() {
+  const int pines[3] = {PIN_NIVEL_1, PIN_NIVEL_2, PIN_NIVEL_3};
+  for (int i = 0; i < 3; i++) {
+    bool lectura = digitalRead(pines[i]); // LOW = vacio, HIGH = con liquido
+    if (lectura == LOW) {
+      if (!candidatoVacioActivo[i]) {
+        candidatoVacioActivo[i] = true;
+        tCandidatoVacio[i] = millis();
+      } else if (!tanqueVacio[i] && millis() - tCandidatoVacio[i] >= TIEMPO_CONFIRMAR_VACIO_MS) {
+        tanqueVacio[i] = true;
+        logSerial("[NIVEL] Tanque " + String(i + 1) + " confirmado VACIO");
+      }
+    } else {
+      candidatoVacioActivo[i] = false;
+      if (tanqueVacio[i]) {
+        tanqueVacio[i] = false;
+        logSerial("[NIVEL] Tanque " + String(i + 1) + " tiene liquido de nuevo");
+      }
+    }
+  }
+}
+
+String mascaraDisponibilidad() {
+  String m = "";
+  for (int i = 0; i < 3; i++) m += tanqueVacio[i] ? "0" : "1";
+  return m;
+}
+
+// DISPENSADO
+bool iniciarDispensado(const char* origen) {
+  if (estadoActual != PAGO_EXITOSO) {
+    logSerial("[DISPENSAR] Ignorado (" + String(origen) + "): no hay pago exitoso pendiente");
+    return false;
+  }
+  activarBomba(prodSel);
+  tInicioDisp = millis();
+
+  float litros = cantidadesPermitidas[volSel - 1];
+  if (prodSel == 1) {
+    pulsosFlujo1 = 0;
+    pulsosObjetivoActual = (unsigned long)(litros * FACTOR_PULSOS_POR_LITRO + 0.5);
+    logSerial("[DISPENSAR] Corte por FLUJO | objetivo: " + String(pulsosObjetivoActual) + " pulsos");
+  } else if (prodSel == 2) {
+    pulsosFlujo2 = 0;
+    pulsosObjetivoActual = (unsigned long)(litros * FACTOR_PULSOS_POR_LITRO + 0.5);
+    logSerial("[DISPENSAR] Corte por FLUJO | objetivo: " + String(pulsosObjetivoActual) + " pulsos");
+  } else {
+    pulsosObjetivoActual = 0;
+    logSerial("[DISPENSAR] Corte por TIEMPO (sin sensor de flujo, producto 3)");
+  }
+
+  logSerial("[DISPENSAR] Iniciado desde: " + String(origen) + " | producto " + String(prodSel) + " | " + String(litros) + " L");
+  cambiarEstado(DISPENSANDO);
+  return true;
+}
+
+void chequearBotonesBoquilla() {
+  bool actBoq1 = digitalRead(PIN_BTN_BOQ_1);
+  bool actBoq2 = digitalRead(PIN_BTN_BOQ_2);
+  bool actBoq3 = digitalRead(PIN_BTN_BOQ_3);
+  unsigned long ahora = millis();
+
+  if (ahora - tUltimoBoton > DEBOUNCE_MS) {
+    if (actBoq1 == LOW && antBoq1 == HIGH && prodSel == 1) { iniciarDispensado("boquilla 1"); tUltimoBoton = ahora; }
+    else if (actBoq2 == LOW && antBoq2 == HIGH && prodSel == 2) { iniciarDispensado("boquilla 2"); tUltimoBoton = ahora; }
+    else if (actBoq3 == LOW && antBoq3 == HIGH && prodSel == 3) { iniciarDispensado("boquilla 3"); tUltimoBoton = ahora; }
+    else if ((actBoq1 == LOW && antBoq1 == HIGH) || (actBoq2 == LOW && antBoq2 == HIGH) || (actBoq3 == LOW && antBoq3 == HIGH)) {
+      logSerial("[BOQUILLA] Boton presionado pero no corresponde al producto pagado");
+      tUltimoBoton = ahora;
+    }
+  }
+  antBoq1 = actBoq1; antBoq2 = actBoq2; antBoq3 = actBoq3;
+}
+
+// Solo duerme si no hay plata/compra en juego (reposo, o QR esperando sin pagar)
+bool puedeDormir() {
+  if (saldo > 0) return false;
+  return (estadoActual == REPOSO || estadoActual == QR_ESPERA);
+}
+
+// Deep sleep real: apaga WiFi, CPU, todo. Al despertar el ESP32 arranca de
+// cero (vuelve a setup(), estado REPOSO) - no retoma la transaccion anterior.
+// Unica forma de despertar: boton fisico en GPIO13 (nivel LOW).
+void entrarDeepSleep() {
+  logSerial("[SLEEP] Sin actividad, entrando a deep sleep. Despierta con el boton fisico.");
+  enviarComandoHMI("EST:SLEEP");
+  hmiSerial.flush();
+  if (servidorActivo) detenerServidorWeb();
+  apagarBombas();
+
+  rtc_gpio_pullup_en((gpio_num_t)PIN_BOTON_DESPERTAR);
+  rtc_gpio_pulldown_dis((gpio_num_t)PIN_BOTON_DESPERTAR);
+  esp_sleep_enable_ext0_wakeup((gpio_num_t)PIN_BOTON_DESPERTAR, 0); // despierta en LOW
+
+  esp_deep_sleep_start(); // no vuelve de aca, reinicia desde setup()
+}
+
+// SERVIDOR WEB BAJO DEMANDA (solo con metodo QR activo)
+void iniciarServidorWeb() {
+  if (servidorActivo) return;
+  WiFi.mode(WIFI_AP);
+  WiFi.softAPConfig(AP_IP, AP_GATEWAY, AP_SUBNET);
+  WiFi.softAP(AP_SSID, AP_PASSWORD);
+  dnsServer.start(53, "*", AP_IP);
+  server.begin();
+  servidorActivo = true;
+  logSerial("[WEB] SoftAP + servidor iniciados. SSID: " + String(AP_SSID) + " | IP: " + WiFi.softAPIP().toString());
+}
+
+void detenerServidorWeb() {
+  if (!servidorActivo) return;
+  server.end();
+  dnsServer.stop();
+  WiFi.softAPdisconnect(true);
+  WiFi.mode(WIFI_OFF);
+  servidorActivo = false;
+  logSerial("[WEB] SoftAP + servidor detenidos");
+}
+
+// PROTOCOLO UART HACIA EL HMI (Arduino Uno + TFT)
+//
+// ESP32 -> Arduino (una linea de texto por comando, sin ACK):
+//   EST:REPOSO
+//   EST:QR_ESPERA
+//   EST:QR_PAGANDO
+//   EST:PAGO_EXITOSO:<prod>:<vol>:<costo>
+//   EST:MONEDA_INGRESO:<saldo>
+//   EST:SEL_PROD:<saldo>:<mascara 3 digitos, 1=disponible 0=vacio>
+//   EST:SEL_VOL:<prod>:<saldo>
+//   EST:CONFIRMACION:<prod>:<vol>:<costo>:<saldo>
+//   EST:DISPENSANDO           (sin segundos: el corte real lo hace el sensor de flujo / el tiempo fijo del producto 3)
+//   EST:FINALIZADO:<costo>
+//   EST:SLEEP                (apagar pantalla por inactividad)
+//   SALDO:<valor>            (refresco rapido de saldo sin cambiar de pantalla)
+//
+// El ESP32 tambien reenvia su estado actual cada 2s sin que cambie nada
+// (heartbeat), para que si el HMI se reinicia solo, se resincronice solo.
+//
+// Arduino -> ESP32:
+//   TOQUE:<1-4>               (boton tocado, el ESP32 interpreta segun su estado)
+//   SYNC                      (el Arduino la manda al arrancar, pide el estado actual ya mismo)
+void enviarComandoHMI(String cmd) {
+  hmiSerial.println(cmd);
+  logSerial("[HMI TX] " + cmd);
+}
+
+void enviarEstadoHMI() {
+  switch (estadoActual) {
+    case REPOSO:
+      enviarComandoHMI("EST:REPOSO");
+      break;
+    case QR_ESPERA:
+      enviarComandoHMI("EST:QR_ESPERA");
+      break;
+    case QR_PAGANDO:
+      enviarComandoHMI("EST:QR_PAGANDO");
+      break;
+    case PAGO_EXITOSO:
+      enviarComandoHMI("EST:PAGO_EXITOSO:" + String(prodSel) + ":" + String(volSel) + ":" + String(costoSel));
+      break;
+    case MONEDA_INGRESO:
+      enviarComandoHMI("EST:MONEDA_INGRESO:" + String(saldo));
+      break;
+    case SEL_PROD:
+      enviarComandoHMI("EST:SEL_PROD:" + String(saldo) + ":" + mascaraDisponibilidad());
+      break;
+    case SEL_VOL:
+      enviarComandoHMI("EST:SEL_VOL:" + String(prodSel) + ":" + String(saldo));
+      break;
+    case CONFIRMACION:
+      enviarComandoHMI("EST:CONFIRMACION:" + String(prodSel) + ":" + String(volSel) + ":" + String(costoSel) + ":" + String(saldo));
+      break;
+    case DISPENSANDO:
+      enviarComandoHMI("EST:DISPENSANDO");
+      break;
+    case FINALIZADO:
+      enviarComandoHMI("EST:FINALIZADO:" + String(costoSel));
+      break;
+  }
+}
+
+void leerSerialHMI() {
+  while (hmiSerial.available() > 0) {
+    char c = hmiSerial.read();
+    if (c == '\n') {
+      bufferHMI.trim();
+      if (bufferHMI.length() > 0) {
+        logSerial("[HMI RX] " + bufferHMI);
+        if (bufferHMI.startsWith("TOQUE:")) {
+          int btn = bufferHMI.substring(6).toInt();
+          manejarToqueHMI(btn);
+        } else if (bufferHMI == "SYNC") {
+          logSerial("[HMI] Pidio SYNC, reenviando estado actual");
+          enviarEstadoHMI();
+        }
+      }
+      bufferHMI = "";
+    } else if (c != '\r') {
+      bufferHMI += c;
+    }
+  }
+}
+
+// NAVEGACION (toques del HMI). btn = 1..4 segun cuadrante tocado en la pantalla.
+void manejarToqueHMI(int btn) {
+  ultimaActividad = millis();
 
   switch (estadoActual) {
-    case EST_REPOSO:
-      if (btn == 1)      { metodoActivo = METODO_QR;     estadoActual = EST_QR_ESPERA; }
-      else if (btn == 2) { metodoActivo = METODO_MONEDA; estadoActual = EST_MONEDA_INGRESO; saldo = 0; }
-      else if (btn == 3) { estadoActual = EST_PRECIOS; }
-      break;
-
-    case EST_PRECIOS:
-      if (btn == 4) estadoActual = EST_REPOSO;
-      break;
-
-    case EST_QR_ESPERA:
-      // DEBUG: simula que ya llego un pago desde la web (Producto 1, 1L),
-      // util para probar sin celular. El pago real siempre llega por /pagar.
+    case REPOSO:
       if (btn == 1) {
-        prodSel  = 1;
-        volSel   = 2; // 1L
-        costoSel = productos[0].precioPorLitro * 1.0;
-        logSerial("[DEBUG] Pago QR simulado desde el panel (Producto 1, 1L)");
-        tInicioPagoQR = millis();
-        estadoActual = EST_QR_PAGANDO;
-      } else if (btn == 4) {
+        metodoActivo = METODO_QR;
+        iniciarServidorWeb();
+        cambiarEstado(QR_ESPERA);
+      } else if (btn == 2) {
+        metodoActivo = METODO_MONEDA;
+        saldo = 0;
+        cambiarEstado(MONEDA_INGRESO);
+      }
+      break;
+
+    case QR_ESPERA:
+      if (btn == 4) { // cancelar
+        detenerServidorWeb();
         metodoActivo = METODO_NINGUNO;
-        estadoActual = EST_REPOSO;
+        cambiarEstado(REPOSO);
       }
       break;
 
-    case EST_MONEDA_INGRESO:
+    case MONEDA_INGRESO:
       if (btn == 4) {
-        if (saldo == 0) { metodoActivo = METODO_NINGUNO; estadoActual = EST_REPOSO; }
-        else            { estadoActual = EST_SELEC_PROD; }
-      }
-      break;
-
-    case EST_SELEC_PROD:
-      if (btn >= 1 && btn <= 3) {
-        prodSel = btn;
-        estadoActual = EST_SELEC_VOL;
-      } else if (btn == 4) {
-        estadoActual = EST_MONEDA_INGRESO;
-      }
-      break;
-
-    case EST_SELEC_VOL: {
-      float pBase = productos[prodSel - 1].precioPorLitro;
-      if (btn >= 1 && btn <= 3) {
-        volSel = btn;
-        costoSel = pBase * cantidadesPermitidas[btn - 1];
-
-        if (saldo >= costoSel) {
-          estadoActual = EST_CONFIRMACION;
+        if (saldo == 0) {
+          metodoActivo = METODO_NINGUNO;
+          cambiarEstado(REPOSO);
         } else {
-          logSerial("Saldo insuficiente.");
-          lcd.setCursor(0, 3); lcd.print("!Saldo Insuficiente!");
-          delay(1200);
-          renderLCD(true);
+          cambiarEstado(SEL_PROD);
+        }
+      }
+      break;
+
+    case SEL_PROD:
+      if (btn >= 1 && btn <= 3) {
+        if (tanqueVacio[btn - 1]) {
+          logSerial("[MENU] Producto " + String(btn) + " sin stock, ignorado");
+        } else {
+          prodSel = btn;
+          cambiarEstado(SEL_VOL);
         }
       } else if (btn == 4) {
-        estadoActual = EST_SELEC_PROD;
+        cambiarEstado(MONEDA_INGRESO);
+      }
+      break;
+
+    case SEL_VOL: {
+      if (btn >= 1 && btn <= 3) {
+        Producto* p = buscarProducto(prodSel);
+        int costo = calcularCosto(p, cantidadesPermitidas[btn - 1]);
+        if (saldo >= costo) {
+          volSel = btn;
+          costoSel = costo;
+          cambiarEstado(CONFIRMACION);
+        } else {
+          logSerial("[MENU] Saldo insuficiente para esa cantidad (" + String(costo) + " Bs, saldo " + String(saldo) + " Bs)");
+          enviarComandoHMI("EST:SALDO_INSUF");
+          enviarEstadoHMI();
+        }
+      } else if (btn == 4) {
+        cambiarEstado(SEL_PROD);
       }
       break;
     }
 
-    case EST_CONFIRMACION:
+    case CONFIRMACION:
       if (btn == 1) {
         saldo -= costoSel;
-        logSerial("Compra confirmada (moneda). Producto P" + String(prodSel) + " | " + getVolText(volSel) + " | " + String(costoSel, 2) + " Bs");
-        estadoActual = EST_QR_PAGADO; // reutiliza la misma pantalla "pago exitoso"
+        logSerial("[MONEDA] Compra confirmada. Producto " + String(prodSel) + " | " + String(costoSel) + " Bs | saldo restante " + String(saldo));
+        cambiarEstado(PAGO_EXITOSO);
       } else if (btn == 4) {
-        estadoActual = EST_SELEC_VOL;
+        cambiarEstado(SEL_VOL);
       }
       break;
 
-    default: break;
+    default:
+      logSerial("[MENU] Toque ignorado, estado " + String(nombreEstado(estadoActual)) + " no escucha el panel");
+      break;
   }
 }
 
-// ACCION DE BOQUILLAS
-void leerBoquillas(int boq) {
-  if (estadoActual == EST_QR_PAGADO) {
-    logSerial("Boquilla pulsada: [" + String(boq) + "]");
-    if (boq == prodSel) {
-      activarBomba(boq);
-      pulsosFlujo1 = 0; pulsosFlujo2 = 0; pulsosFlujo3 = 0; // reinicia conteo para este dispensado
-      segRestantes = 10;
-      segAnteriores = -1;
-      tInicioDisp = millis();
-      estadoActual = EST_DISPENSANDO;
-      logSerial("Bombeando 10 segundos (por tiempo, sin corte por sensor aun).");
-    } else {
-      logSerial("Error: debe ser boquilla " + String(prodSel));
-    }
-  }
-}
-
-// ACTUALIZACION DE ESTADOS POR TIEMPO (pago QR, dispensado, finalizado)
-void actualizarEstadoTiempos() {
-  if (estadoActual == EST_QR_PAGANDO) {
-    if (millis() - tInicioPagoQR >= TIEMPO_PAGO_MS) {
-      estadoActual = EST_QR_PAGADO;
-      logSerial("Pago QR confirmado -> PAGO_EXITOSO");
-    }
-  } else if (estadoActual == EST_DISPENSANDO) {
-    unsigned long transcurrido = millis() - tInicioDisp;
-    if (transcurrido < TIEMPO_DISP_MS) {
-      segRestantes = 10 - (transcurrido / 1000);
-      if (segRestantes != segAnteriores) {
-        segAnteriores = segRestantes;
-        renderLCD(false);
-        // Log de pulsos de flujo acumulados (documentacion para calibrar mas
-        // adelante, todavia no se usa para cortar el bombeo)
-        debugPrint("[FLUJO] P1:"); debugPrint(pulsosFlujo1);
-        debugPrint(" P2:"); debugPrint(pulsosFlujo2);
-        debugPrint(" P3:"); debugPrintln(pulsosFlujo3);
-      }
-    } else {
-      apagarBombas();
-      logSerial("Dispensado completado.");
-      estadoActual = EST_FINALIZADO;
-      tInicioFin = millis();
-    }
-  } else if (estadoActual == EST_FINALIZADO) {
-    if (millis() - tInicioFin >= TIEMPO_FIN_MS) {
-      if (saldo > 0) {
-        estadoActual = EST_MONEDA_INGRESO;
-      } else {
-        metodoActivo = METODO_NINGUNO;
-        estadoActual = EST_REPOSO;
-      }
-      prodSel = 0; volSel = 0; costoSel = 0;
-    }
-  }
-
-  if (estadoActual != estadoAnterior) {
-    renderLCD(true);
-  }
-}
-
-// HANDLERS DEL SERVIDOR WEB
+// ENDPOINTS WEB (metodo QR)
 void handleGetProductos(AsyncWebServerRequest *request) {
   JsonDocument doc;
   JsonArray arr = doc["productos"].to<JsonArray>();
@@ -532,6 +589,7 @@ void handleGetProductos(AsyncWebServerRequest *request) {
     p["id"] = productos[i].id;
     p["nombre"] = productos[i].nombre;
     p["precioPorLitro"] = productos[i].precioPorLitro;
+    p["disponible"] = !tanqueVacio[i];
   }
   String out;
   serializeJson(doc, out);
@@ -547,44 +605,28 @@ bool litrosValidos(float litros) {
 
 void handlePagarBody(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
   if (metodoActivo != METODO_QR) {
-    debugPrint("[PAGAR] Rechazado (metodo activo: ");
-    debugPrint(nombreMetodo(metodoActivo));
-    debugPrintln(")");
-    JsonDocument resp;
-    resp["status"] = "forbidden";
-    resp["message"] = "El pago por QR no esta disponible en este momento";
-    resp["metodo"] = nombreMetodo(metodoActivo);
-    String out;
-    serializeJson(resp, out);
-    request->send(403, "application/json", out);
+    logSerial("[WEB] /pagar rechazado (metodo activo: " + String(nombreMetodo(metodoActivo)) + ")");
+    request->send(403, "application/json", "{\"status\":\"forbidden\",\"message\":\"Pago QR no disponible\",\"metodo\":\"" + String(nombreMetodo(metodoActivo)) + "\"}");
     return;
   }
-
-  if (estadoActual != EST_QR_ESPERA) {
-    debugPrint("[PAGAR] Rechazado (sistema ocupado) -> intento desde IP: ");
-    debugPrintln(request->client()->remoteIP());
-    JsonDocument resp;
-    resp["status"] = "busy";
-    resp["message"] = "Dispensador ocupado, espera un momento";
-    String out;
-    serializeJson(resp, out);
-    request->send(503, "application/json", out);
+  if (estadoActual != QR_ESPERA) {
+    logSerial("[WEB] /pagar rechazado (sistema ocupado) -> IP: " + request->client()->remoteIP().toString());
+    request->send(503, "application/json", "{\"status\":\"busy\",\"message\":\"Dispensador ocupado\"}");
     return;
   }
 
   JsonDocument doc;
-  DeserializationError err = deserializeJson(doc, data, len);
-  if (err) {
+  if (deserializeJson(doc, data, len)) {
     request->send(400, "application/json", "{\"status\":\"error\",\"message\":\"JSON invalido\"}");
     return;
   }
 
   int idProducto = doc["producto"] | 0;
   float litros = doc["litros"] | 0.0;
+  Producto* p = buscarProducto(idProducto);
 
-  ProductoConfig* p = buscarProducto(idProducto);
-  if (p == nullptr) {
-    request->send(400, "application/json", "{\"status\":\"error\",\"message\":\"Producto invalido\"}");
+  if (p == nullptr || tanqueVacio[idProducto - 1]) {
+    request->send(400, "application/json", "{\"status\":\"error\",\"message\":\"Producto no disponible\"}");
     return;
   }
   if (!litrosValidos(litros)) {
@@ -593,24 +635,16 @@ void handlePagarBody(AsyncWebServerRequest *request, uint8_t *data, size_t len, 
   }
 
   prodSel  = p->id;
-  volSel   = volSelDeLitros(litros);
-  costoSel = litros * p->precioPorLitro;
+  volSel   = (fabs(litros - 0.5) < 0.01) ? 1 : (fabs(litros - 1.0) < 0.01) ? 2 : 3;
+  costoSel = calcularCosto(p, litros);
   tInicioPagoQR = millis();
-  estadoActual = EST_QR_PAGANDO;
 
-  debugPrint("[PAGAR] Simulacion iniciada desde IP: ");
-  debugPrint(request->client()->remoteIP());
-  debugPrint(" | producto: ");
-  debugPrint(p->nombre);
-  debugPrint(" | litros: ");
-  debugPrint(litros);
-  debugPrint(" | monto: ");
-  debugPrintln(costoSel);
+  logSerial("[WEB] /pagar OK desde IP " + request->client()->remoteIP().toString() + " | producto " + p->nombre + " | " + String(litros) + "L | " + String(costoSel) + " Bs");
+  cambiarEstado(QR_PAGANDO);
 
   JsonDocument resp;
   resp["status"] = "ok";
   resp["monto"] = costoSel;
-  resp["tiempoEstimadoSeg"] = TIEMPO_DISP_MS / 1000;
   String out;
   serializeJson(resp, out);
   request->send(200, "application/json", out);
@@ -620,20 +654,18 @@ void handleGetEstado(AsyncWebServerRequest *request) {
   JsonDocument doc;
   doc["metodo"] = nombreMetodo(metodoActivo);
 
-  if (estadoActual == EST_QR_PAGANDO) {
+  if (estadoActual == QR_PAGANDO) {
     doc["estado"] = "pagando";
     long restante = (long)(TIEMPO_PAGO_MS / 1000) - (long)((millis() - tInicioPagoQR) / 1000);
-    if (restante < 0) restante = 0;
-    doc["segundosRestantes"] = restante;
-  } else if (estadoActual == EST_QR_PAGADO) {
+    doc["segundosRestantes"] = restante < 0 ? 0 : restante;
+  } else if (estadoActual == PAGO_EXITOSO) {
     doc["estado"] = "pago_exitoso";
     doc["monto"] = costoSel;
     doc["producto"] = prodSel;
-  } else if (estadoActual == EST_DISPENSANDO) {
-    doc["estado"] = "dispensando";
-    doc["segundosRestantes"] = segRestantes;
+  } else if (estadoActual == DISPENSANDO) {
+    doc["estado"] = "dispensando"; // sin tiempo: corta el sensor de flujo, no un timer
     doc["monto"] = costoSel;
-  } else if (estadoActual == EST_FINALIZADO) {
+  } else if (estadoActual == FINALIZADO) {
     doc["estado"] = "finalizado";
     doc["monto"] = costoSel;
   } else {
@@ -645,60 +677,79 @@ void handleGetEstado(AsyncWebServerRequest *request) {
   request->send(200, "application/json", out);
 }
 
-// [DEBUG] Simula el boton fisico de la boquilla desde la web, util para
-// probar el flujo QR sin tener las boquillas conectadas todavia.
-void handleSimularBoton(AsyncWebServerRequest *request) {
-  bool ok = false;
-  if (estadoActual == EST_QR_PAGADO) {
-    activarBomba(prodSel);
-    pulsosFlujo1 = 0; pulsosFlujo2 = 0; pulsosFlujo3 = 0;
-    segRestantes = 10;
-    segAnteriores = -1;
-    tInicioDisp = millis();
-    estadoActual = EST_DISPENSANDO;
-    logSerial("[DEBUG] Dispensado simulado desde la web");
-    ok = true;
-  }
-  JsonDocument resp;
-  resp["status"] = ok ? "ok" : "error";
-  resp["message"] = ok ? "Dispensado simulado iniciado" : "No hay un pago exitoso pendiente";
-  String out;
-  serializeJson(resp, out);
-  request->send(ok ? 200 : 400, "application/json", out);
-}
-
 void handleCaptivePortal(AsyncWebServerRequest *request) {
   request->redirect("/");
 }
 
 void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
-  switch (event) {
-    case ARDUINO_EVENT_WIFI_AP_STACONNECTED: {
-      char mac[18];
-      snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
-        info.wifi_ap_staconnected.mac[0], info.wifi_ap_staconnected.mac[1],
-        info.wifi_ap_staconnected.mac[2], info.wifi_ap_staconnected.mac[3],
-        info.wifi_ap_staconnected.mac[4], info.wifi_ap_staconnected.mac[5]);
-      debugPrint("[WIFI] Cliente CONECTADO -> MAC: ");
-      debugPrint(mac);
-      debugPrint(" | clientes actuales: ");
-      debugPrintln(WiFi.softAPgetStationNum());
-      break;
+  if (event == ARDUINO_EVENT_WIFI_AP_STACONNECTED) {
+    char mac[18];
+    snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
+      info.wifi_ap_staconnected.mac[0], info.wifi_ap_staconnected.mac[1],
+      info.wifi_ap_staconnected.mac[2], info.wifi_ap_staconnected.mac[3],
+      info.wifi_ap_staconnected.mac[4], info.wifi_ap_staconnected.mac[5]);
+    logSerial("[WIFI] Cliente conectado -> MAC: " + String(mac));
+  } else if (event == ARDUINO_EVENT_WIFI_AP_STADISCONNECTED) {
+    logSerial("[WIFI] Cliente desconectado");
+  }
+}
+
+// TRANSICIONES AUTOMATICAS POR TIEMPO
+void actualizarEstadoTiempos() {
+  if (estadoActual == QR_PAGANDO) {
+    if (millis() - tInicioPagoQR >= TIEMPO_PAGO_MS) {
+      logSerial("[PAGO] Pago QR confirmado");
+      cambiarEstado(PAGO_EXITOSO);
     }
-    case ARDUINO_EVENT_WIFI_AP_STADISCONNECTED: {
-      char mac[18];
-      snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
-        info.wifi_ap_stadisconnected.mac[0], info.wifi_ap_stadisconnected.mac[1],
-        info.wifi_ap_stadisconnected.mac[2], info.wifi_ap_stadisconnected.mac[3],
-        info.wifi_ap_stadisconnected.mac[4], info.wifi_ap_stadisconnected.mac[5]);
-      debugPrint("[WIFI] Cliente DESCONECTADO -> MAC: ");
-      debugPrint(mac);
-      debugPrint(" | clientes actuales: ");
-      debugPrintln(WiFi.softAPgetStationNum());
-      break;
+  } else if (estadoActual == DISPENSANDO) {
+    unsigned long transcurrido = millis() - tInicioDisp;
+    bool completado = false;
+
+    if (prodSel == 1) {
+      completado = (pulsosFlujo1 >= pulsosObjetivoActual);
+    } else if (prodSel == 2) {
+      completado = (pulsosFlujo2 >= pulsosObjetivoActual);
+    } else {
+      completado = (transcurrido >= TIEMPO_DISP_MS); // producto 3, sin sensor
     }
-    default:
-      break;
+
+    if (!completado && transcurrido >= TIEMPO_MAX_DISPENSADO_MS) {
+      completado = true;
+      logSerial("[DISPENSAR][ALERTA] Corte de SEGURIDAD por tiempo maximo - revisar sensor de flujo, no llego al objetivo");
+    }
+
+    // Log de progreso cada 250ms (solo Serial, no se manda al HMI)
+    static unsigned long tUltimoLogFlujo = 0;
+    if (millis() - tUltimoLogFlujo >= 250) {
+      tUltimoLogFlujo = millis();
+      unsigned long pulsosActuales = (prodSel == 1) ? pulsosFlujo1 : (prodSel == 2) ? pulsosFlujo2 : 0;
+      debugPrint("[FLUJO] prod:"); debugPrint(prodSel);
+      debugPrint(" pulsos:"); debugPrint(pulsosActuales);
+      debugPrint("/"); debugPrintln(pulsosObjetivoActual);
+    }
+
+    if (completado) {
+      apagarBombas();
+      logSerial("[DISPENSAR] Completado");
+      tInicioFin = millis();
+      cambiarEstado(FINALIZADO);
+    }
+  } else if (estadoActual == FINALIZADO) {
+    if (millis() - tInicioFin >= TIEMPO_FIN_MS) {
+      prodSel = 0; volSel = 0; costoSel = 0;
+      if (metodoActivo == METODO_MONEDA && saldo > 0) {
+        cambiarEstado(MONEDA_INGRESO);
+      } else {
+        if (metodoActivo == METODO_QR) detenerServidorWeb();
+        metodoActivo = METODO_NINGUNO;
+        cambiarEstado(REPOSO);
+      }
+    }
+  }
+
+  // Bajo consumo: solo se apaga la pantalla en REPOSO, nunca a mitad de una compra
+  if (puedeDormir() && millis() - ultimaActividad >= TIEMPO_INACTIVIDAD_MS) {
+    entrarDeepSleep();
   }
 }
 
@@ -709,60 +760,43 @@ void setup() {
     delay(300);
   #endif
 
-  Wire.begin(21, 22);
-  lcd.init();
-  lcd.backlight();
-
-  pinMode(PIN_BTN_MENU_1, INPUT_PULLUP);
-  pinMode(PIN_BTN_MENU_2, INPUT_PULLUP);
-  pinMode(PIN_BTN_MENU_3, INPUT_PULLUP);
-  pinMode(PIN_BTN_MENU_4, INPUT_PULLUP);
-
-  pinMode(PIN_BTN_BOQ_1, INPUT_PULLUP);
-  pinMode(PIN_BTN_BOQ_2, INPUT_PULLUP);
-  pinMode(PIN_BTN_BOQ_3, INPUT_PULLUP);
+  hmiSerial.begin(HMI_BAUDIOS, SERIAL_8N1, PIN_HMI_RX2, PIN_HMI_TX2);
 
   pinMode(PIN_PLC_BOMBA_1, OUTPUT);
   pinMode(PIN_PLC_BOMBA_2, OUTPUT);
   pinMode(PIN_PLC_BOMBA_3, OUTPUT);
   apagarBombas();
 
-  pinMode(PIN_COIN_SET, OUTPUT);
-  digitalWrite(PIN_COIN_SET, LOW); // inhibido al iniciar (Estado Reposo)
+  pinMode(PIN_BTN_BOQ_1, INPUT_PULLUP);
+  pinMode(PIN_BTN_BOQ_2, INPUT_PULLUP);
+  pinMode(PIN_BTN_BOQ_3, INPUT_PULLUP);
+
+  pinMode(PIN_NIVEL_1, INPUT_PULLUP);
+  pinMode(PIN_NIVEL_2, INPUT_PULLUP);
+  pinMode(PIN_NIVEL_3, INPUT_PULLUP);
+
+  pinMode(PIN_BOTON_DESPERTAR, INPUT_PULLUP);
 
   pinMode(PIN_COIN, INPUT);
+  pinMode(PIN_COIN_SET, OUTPUT);
+  digitalWrite(PIN_COIN_SET, LOW); // inhibido al iniciar
   attachInterrupt(digitalPinToInterrupt(PIN_COIN), ISR_Moneda, FALLING);
 
-  // Sensores de flujo: declarados y con interrupcion activa, solo para
-  // empezar a ver pulsos en el Serial. Sin logica de corte todavia.
   pinMode(PIN_FLUJO_1, INPUT);
   pinMode(PIN_FLUJO_2, INPUT);
-  pinMode(PIN_FLUJO_3, INPUT);
-  attachInterrupt(digitalPinToInterrupt(PIN_FLUJO_1), ISR_Flujo1, RISING);
-  attachInterrupt(digitalPinToInterrupt(PIN_FLUJO_2), ISR_Flujo2, RISING);
-  attachInterrupt(digitalPinToInterrupt(PIN_FLUJO_3), ISR_Flujo3, RISING);
+  attachInterrupt(digitalPinToInterrupt(PIN_FLUJO_1), ISR_Flujo1, FALLING);
+  attachInterrupt(digitalPinToInterrupt(PIN_FLUJO_2), ISR_Flujo2, FALLING);
 
-  // --- LittleFS ---
   if (!LittleFS.begin(true)) {
-    debugPrintln("[SETUP][ERROR] Fallo montando LittleFS");
+    logSerial("[SETUP][ERROR] Fallo montando LittleFS");
   } else {
-    debugPrintln("[SETUP] LittleFS montado OK");
+    logSerial("[SETUP] LittleFS montado OK");
   }
 
-  // --- WiFi SoftAP ---
   WiFi.onEvent(onWiFiEvent);
-  WiFi.mode(WIFI_AP);
-  WiFi.softAPConfig(AP_IP, AP_GATEWAY, AP_SUBNET);
-  WiFi.softAP(AP_SSID, AP_PASSWORD);
-  debugPrint("[SETUP] SoftAP iniciado. SSID: ");
-  debugPrint(AP_SSID);
-  debugPrint(" | IP: ");
-  debugPrintln(WiFi.softAPIP());
 
-  // --- DNS (portal cautivo) ---
-  dnsServer.start(53, "*", AP_IP);
-
-  // --- Rutas API ---
+  // Rutas del servidor web (se registran una sola vez; el AP/servidor
+  // se prende y apaga aparte con iniciarServidorWeb()/detenerServidorWeb())
   server.on("/productos", HTTP_GET, handleGetProductos);
   server.on("/estado", HTTP_GET, handleGetEstado);
   server.on("/pagar", HTTP_POST,
@@ -770,64 +804,47 @@ void setup() {
     nullptr,
     handlePagarBody
   );
-  server.on("/simular-boton", HTTP_POST, handleSimularBoton); // DEBUG
-
-  // --- Rutas de deteccion de portal cautivo ---
   server.on("/generate_204", HTTP_GET, handleCaptivePortal);
   server.on("/gen_204", HTTP_GET, handleCaptivePortal);
   server.on("/hotspot-detect.html", HTTP_GET, handleCaptivePortal);
   server.on("/library/test/success.html", HTTP_GET, handleCaptivePortal);
   server.on("/ncsi.txt", HTTP_GET, handleCaptivePortal);
   server.on("/connecttest.txt", HTTP_GET, handleCaptivePortal);
-
   server.serveStatic("/", LittleFS, "/").setDefaultFile("index.html");
   server.onNotFound(handleCaptivePortal);
 
-  server.begin();
+  ultimaActividad = millis();
+  actualizarMonederoHabilitado();
 
-  logSerial("Sistema iniciado correctamente. Esperando interaccion...");
-  renderLCD(true);
+  logSerial("=== SISTEMA INICIADO ===");
+  logSerial("Estado inicial: " + String(nombreEstado(estadoActual)));
+  enviarEstadoHMI();
 }
 
 // LOOP PRINCIPAL
 void loop() {
-  dnsServer.processNextRequest();
-  unsigned long tActual = millis();
+  if (servidorActivo) dnsServer.processNextRequest();
 
-  // 1. Gestion del monedero
-  if (hayPulso && !conteoEnProceso) {
-    conteoEnProceso = true;
-    tInicioConteo = millis();
+  // Monedero
+  if (hayPulsoMoneda && !conteoMonedaEnProceso) {
+    conteoMonedaEnProceso = true;
+    tInicioConteoMoneda = millis();
     digitalWrite(PIN_COIN_SET, LOW);
-    logSerial("Moneda detectada -> SET: BLOQUEADO");
+    logSerial("[MONEDERO] Moneda detectada -> SET bloqueado temporalmente");
   }
-  if (conteoEnProceso && (millis() - tInicioConteo >= TIEMPO_CONTEO)) {
+  if (conteoMonedaEnProceso && (millis() - tInicioConteoMoneda >= TIEMPO_CONTEO_MONEDA)) {
     procesarMoneda();
   }
 
-  // 2. Lectura de botones (menu + boquillas)
-  bool actMenu1 = digitalRead(PIN_BTN_MENU_1);
-  bool actMenu2 = digitalRead(PIN_BTN_MENU_2);
-  bool actMenu3 = digitalRead(PIN_BTN_MENU_3);
-  bool actMenu4 = digitalRead(PIN_BTN_MENU_4);
-  bool actBoq1  = digitalRead(PIN_BTN_BOQ_1);
-  bool actBoq2  = digitalRead(PIN_BTN_BOQ_2);
-  bool actBoq3  = digitalRead(PIN_BTN_BOQ_3);
-
-  if (tActual - tUltimoBoton > DEBOUNCE_MS) {
-    if (actMenu1 == LOW && antMenu1 == HIGH)      { leerNavegacion(1); tUltimoBoton = tActual; }
-    else if (actMenu2 == LOW && antMenu2 == HIGH) { leerNavegacion(2); tUltimoBoton = tActual; }
-    else if (actMenu3 == LOW && antMenu3 == HIGH) { leerNavegacion(3); tUltimoBoton = tActual; }
-    else if (actMenu4 == LOW && antMenu4 == HIGH) { leerNavegacion(4); tUltimoBoton = tActual; }
-
-    if (actBoq1 == LOW && antBoq1 == HIGH)      { leerBoquillas(1); tUltimoBoton = tActual; }
-    else if (actBoq2 == LOW && antBoq2 == HIGH) { leerBoquillas(2); tUltimoBoton = tActual; }
-    else if (actBoq3 == LOW && antBoq3 == HIGH) { leerBoquillas(3); tUltimoBoton = tActual; }
-  }
-
-  antMenu1 = actMenu1; antMenu2 = actMenu2; antMenu3 = actMenu3; antMenu4 = actMenu4;
-  antBoq1  = actBoq1;  antBoq2  = actBoq2;  antBoq3  = actBoq3;
-
-  // 3. Transiciones automaticas por tiempo (pago QR, dispensado, finalizado)
+  leerSerialHMI();
+  chequearBotonesBoquilla();
+  chequearSensoresNivel();
   actualizarEstadoTiempos();
+
+  // Heartbeat: reenvia el estado actual cada 2s, asi si el HMI se reinicia
+  // solo (o al reves), se resincroniza sin que nadie tenga que hacer nada.
+  if (millis() - tUltimoHeartbeat >= HEARTBEAT_MS) {
+    tUltimoHeartbeat = millis();
+    enviarEstadoHMI();
+  }
 }
