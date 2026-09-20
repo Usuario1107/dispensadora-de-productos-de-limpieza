@@ -1,38 +1,41 @@
-# Documentación General: Dispensador Automático de Detergentes
+# 🧼 Dispensador Automático de Detergentes
 
 ## 📌 1. Descripción del Proyecto
 
-Este proyecto consiste en el desarrollo del firmware para una máquina expendedora automática de líquidos (3 tipos de detergentes). El sistema permite comprar detergente en granel, Seleccionar el tipo de detergente y el volumen específico (0.5L, 1L, 2L) tres tipos de volumen para cada peoducto y pagar mediante dos métodos: **Monedero Físico (Multicoin)** o **Pasarela Web (Simulacion)**.
+Este proyecto consiste en el desarrollo del firmware para una máquina expendedora automática de líquidos diseñada para dispensar 3 tipos de detergentes a granel. 
+
+El sistema permite a los usuarios:
+* **Seleccionar el tipo de detergente.**
+* **Elegir un volumen específico** entre tres opciones disponibles por producto (0.5L, 1L y 2L).
+* **Pagar mediante dos métodos:** Monedero físico (Multicoin) o una pasarela de pago Web simulada mediante código QR.
 
 ## 🛠️ 2. Entorno de Desarrollo (Stack Tecnológico)
 
-- **IDE:** Visual Studio Code (VS Code).
-- **Framework y Gestor:** PlatformIO usando el framework de Arduino (C++).
-- **Gestión de Archivos Web:** LittleFS y ESPAsyncWebServer para la interfaz de pago online y estara disponible cuando seleccione el metodo de pago por QR.
-- **Manejo de Librerías:** Durante el desarrollo de cada módulo, se evaluará y seleccionará la librería más eficiente y ligera para cada hardware (ej. para la pantalla, librerías de interrupciones para el flujo, etc.).
+* **IDE:** Visual Studio Code (VS Code).
+* **Framework y Gestor:** PlatformIO utilizando el framework de Arduino (C++).
+* **Gestión de Archivos Web:** LittleFS y `ESPAsyncWebServer` para servir la interfaz de pago online, la cual estará disponible únicamente cuando se seleccione el método de pago por QR.
+* **Manejo de Librerías:** Durante el desarrollo de cada módulo, se selecciona la librería más eficiente y ligera para cada componente de hardware (pantalla, interrupciones de flujo, etc.).
 
 ## ⚙️ 3. Componentes de Hardware y su Función General
 
-1. **Microcontrolador Master (ESP32 - 38 pines):** Cerebro lógico del sistema, la máquina de estados, el servidor web y procesa los datos.
-2. **Actuador de Potencia (PLC Industrial):** Actúa como esclavo de potencia. Sus relés de 10A encienden y apagan las bombas de 12V/24V.
-3. **Placa de Optoacopladores:** Aísla eléctricamente las señales de 3.3V del ESP32 hacia las entradas lógicas (12V/24V) del PLC, protegiendo el microcontrolador.
-4. **Sensores de Flujo (2x YF-S201):** Ubicados en cada dos línea de líquido. Envían pulsos digitales al ESP32 para calcular con exactitud los mililitros dispensados .
-5. **Módulo shield pantalla TFT LCD 2.4'' Arduino** Muestra la interfaz de usuario, menús, saldos se comunica por UART eL ESP32 con el ARDUINO UNO(QUE CONTROLA EL HMI).
-6. **Sistema de Pago (Monedero Multicoin):** Configurado para enviar pulsos al ESP32. Cuenta con un pin DESABILITAR (`SET`) para bloquear la entrada de dinero si la máquina no está en modo de cobro por moneda.
-7. **Botonera de Navegación :** Se utlizan la botones tactiles en la pantlla HMI.
-8. **Botonera de Dispensado (3 Botones):** Ubicados en cada boquilla de salida. Solo se habilitan cuando el pago ha sido exitoso y determinan el inicio del bombeo físico.
-9. **Sensores de nivel interruptor (3 Sensores)** cierra cuando no hay liquido ABRE cuando hay lirquido asi que la señal que se enviara pora hi hace eso para ocultar las opciones que hay disponible para seleccionar.
-10. **Boton de despertar (1 pulsador):** La funcion de este es caudno el usuario quiero comprar despierte todo el sitema de control el sitema de control de dormira depues de x minutos puesto en el progmra depseus de que no hay uso de manjero de la maquina esto para reducir el consumo .
+1. **Microcontrolador Master (ESP32 - 38 pines):** Es el cerebro lógico del sistema. Maneja la máquina de estados, el servidor web, procesa los datos y toma las decisiones de dispensado.
+2. **Interfaz HMI (Arduino Uno + Pantalla TFT LCD 2.4''):** Muestra la interfaz gráfica de usuario, los menús y el saldo. Se comunica de forma bidireccional por UART con el ESP32.
+3. **Actuador de Potencia (PLC Industrial):** Actúa como esclavo de potencia. Sus relés de 10A se encargan de encender y apagar las bombas de 12V/24V.
+4. **Placa de Optoacopladores:** Aísla eléctricamente las señales de control de 3.3V (ESP32) hacia las entradas lógicas de 12V/24V del PLC, protegiendo al microcontrolador.
+5. **Medición de Líquidos:**
+   * **Sensores de Flujo (2x YF-S201):** Ubicados en dos de las líneas de líquido. Envían pulsos digitales al ESP32 (leídos por interrupción) para calcular con exactitud los mililitros dispensados.
+   * **Temporizador (1x):** La tercera línea de producto (alta viscosidad) se controla por tiempo de bombeo, utilizando 3 tiempos independientes y configurables según el volumen seleccionado (0.5L, 1L y 2L).
+6. **Sistema de Pago (Monedero Multicoin):** Configurado para enviar pulsos al ESP32. Cuenta con un pin `SET` para deshabilitar y bloquear físicamente la entrada de monedas si la máquina no está en la pantalla de cobro por efectivo.
+7. **Botonera de Navegación:** Botones táctiles integrados directamente en la pantalla HMI.
+8. **Botonera de Dispensado (3 Pulsadores Físicos):** Ubicados en cada boquilla de salida. Solo se habilitan cuando el pago ha sido exitoso e inician el bombeo del líquido comprado.
+9. **Sensores de Nivel (3 Interruptores Flotadores):** Operan con lógica inversa (cierran circuito cuando no hay líquido y abren cuando hay líquido). Esta señal indica al sistema qué opciones de productos ocultar en la pantalla HMI.
+10. **Botón de Despertar (1 Pulsador):** Permite reactivar la máquina desde el modo de bajo consumo. Tras "X" minutos de inactividad, el sistema apaga la pantalla HMI para ahorrar energía (sin perder los datos de saldo ni la memoria RAM) y muestra un mensaje para presionar este botón.
 
 ## 🎯 4. Objetivos y Metodología de Trabajo
 
-- **Desarrollo Modular:** El código se construirá y probará en módulos separados:
-
-1. LCD y Menú ARDUINO UNO - ESP32 comunuacion sincronizado
-2. Monedero HECHO
-3. Sensor de flujo HECHO
-4. Servidor Web(simulacion de pago online) FALTA RESTRICCIONES
-
-Esto se trabjara por separado primero luego se uniara todo en uno.
-
-- **Optimización:** Reutilizar funciones y código de renderizado (pantallas) para ahorrar memoria RAM y Flash en el ESP32 y ARDUINO.
+* **Desarrollo Modular:** El código se construye y prueba en módulos separados antes de la integración final:
+  1. HMI (Arduino Uno) - ESP32: Comunicación UART sincronizada.
+  2. Monedero (Lógica e interrupciones) - *Completado.*
+  3. Sensores de flujo - *Completado.*
+  4. Servidor Web (Simulación de pago online) - *Pendiente de restricciones de estado.*
+* **Optimización:** Reutilizar funciones y simplificar el código de renderizado visual para ahorrar memoria RAM y Flash, garantizando la estabilidad tanto en el ESP32 como en el Arduino Uno.
