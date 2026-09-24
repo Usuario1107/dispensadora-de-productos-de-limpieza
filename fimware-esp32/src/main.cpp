@@ -59,9 +59,9 @@ float FACTOR_PULSOS_POR_LITRO_1 = 530.0;
 float FACTOR_PULSOS_POR_LITRO_2 = 530.0;
 
 // Corte de seguridad por producto (si el sensor no marca nunca el objetivo)
-const unsigned long TIEMPO_MAX_DISPENSADO_1_MS = 20000;
-const unsigned long TIEMPO_MAX_DISPENSADO_2_MS = 20000;
-const unsigned long TIEMPO_MAX_DISPENSADO_3_MS = 20000; // producto 3 ya es por tiempo fijo, este es margen extra
+const unsigned long TIEMPO_MAX_DISPENSADO_1_MS = 5000;
+const unsigned long TIEMPO_MAX_DISPENSADO_2_MS = 5000;
+const unsigned long TIEMPO_MAX_DISPENSADO_3_MS = 5000; // producto 3 ya es por tiempo fijo, este es margen extra
 
 // WIFI SOFTAP (editable) - se enciende solo bajo demanda (metodo QR)
 const char *AP_SSID = "ESP32-DEV";
@@ -191,7 +191,7 @@ int volSel = 0; // 1: 0.5L, 2: 1L, 3: 2L
 int costoSel = 0;
 
 const unsigned long TIEMPO_PAGO_MS = 5000;                       // simulacion de pago QR
-const unsigned long TIEMPO_DISP_MS = 10000;                      // solo para el producto 3 (sin sensor de flujo)
+const unsigned long TIEMPO_DISP_MS = 5000;                      // solo para el producto 3 (sin sensor de flujo)
 const unsigned long TIEMPO_FIN_MS = 5000;                        // pantalla "retire su producto"
 const unsigned long TIEMPO_INACTIVIDAD_MS = 2UL * 60UL * 1000UL; // 3 min sin actividad -> deep sleep
 

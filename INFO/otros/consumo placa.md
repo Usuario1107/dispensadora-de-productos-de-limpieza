@@ -21,7 +21,7 @@ Los valores expresados a continuación representan el amperaje extraído directa
 | :------------------------------------------------------ | :----------------------- | :-------------------- | :-------------------------------------------------------------------------------------------------------- |
 | **Microcontrolador ESP32** _(Vía Step-Down)_            | 40 mA                    | 200 mA                | Transmisión activa de datos por antena Wi-Fi y Bluetooth simultáneamente.                                 |
 | **HMI (Arduino Uno + Pantalla 2.4")** _(Vía Step-Down)_ | 120 mA                   | 160 mA                | Actualización rápida de gráficos en pantalla, retroiluminación al 100% y procesamiento de toques (Touch). |
-| **Monedero Multimonedas** _(Directo a 12V)_             | 50 mA                    | 450 mA                | Activación de la bobina electromagnética (solenoide) para aceptar o rechazar una moneda física.           |
+| **Monedero Multimonedas** _(Directo a 12V)_             | 50 mA                    | 350 mA                | Activación de la bobina electromagnética (solenoide) para aceptar o rechazar una moneda física.           |
 | **Periféricos y Optoacopladores** _(Señales a 12V)_     | 20 mA                    | 100 mA                | Todos los LEDs de los optoacopladores encendidos, botones pulsados y sensores de flujo enviando pulsos.   |
 | **Módulo Step-Down** _(Pérdidas térmicas)_              | 20 mA                    | 40 mA                 | Energía disipada en forma de calor por el regulador al bajar el voltaje de 12V a 5V bajo carga.           |
 

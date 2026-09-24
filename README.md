@@ -1,4 +1,4 @@
-# 🧼 Dispensador Automático de Detergentes
+# 🧼 Dispensador Automático de Detergentes DE BRAYAN
 
 ## 📌 1. Descripción del Proyecto
 
