@@ -58,18 +58,27 @@ const int PIN_BOTON_DESPERTAR = 13;
 const int INPUT_AUX_1 = 35;
 const int INPUT_AUX_2 = 34;
 
-// Los 3 productos se dispensan por tiempo fijo (sin sensor de flujo).
-// Valor por defecto , editable por producto.
-const unsigned long TIEMPO_DISP_1_MS = 5000UL;
-const unsigned long TIEMPO_DISP_2_MS = 6000UL;
-const unsigned long TIEMPO_DISP_3_MS = 7000UL;
-unsigned long tiempoDispensadoDe(int prod)
+// Tiempo base para 1 litro de cada producto, sin sensor de flujo.
+const unsigned long TIEMPO_DISP_1L_PROD_1_MS = 8000UL; //6
+const unsigned long TIEMPO_DISP_1L_PROD_2_MS = 8000UL; //5
+const unsigned long TIEMPO_DISP_1L_PROD_3_MS = 8000UL; //4
+
+unsigned long tiempoDispensadoDe(int prod, int vol)
 {
+  unsigned long tiempoBase;
+
   if (prod == 1)
-    return TIEMPO_DISP_1_MS;
-  if (prod == 2)
-    return TIEMPO_DISP_2_MS;
-  return TIEMPO_DISP_3_MS;
+    tiempoBase = TIEMPO_DISP_1L_PROD_1_MS;
+  else if (prod == 2)
+    tiempoBase = TIEMPO_DISP_1L_PROD_2_MS;
+  else
+    tiempoBase = TIEMPO_DISP_1L_PROD_3_MS;
+
+  if (vol == 1)
+    return tiempoBase / 2;
+  if (vol == 2)
+    return tiempoBase;
+  return tiempoBase * 2;
 }
 
 // WIFI SOFTAP (editable) - se enciende solo bajo demanda (metodo QR)
@@ -398,7 +407,7 @@ bool iniciarDispensado(const char *origen)
   tInicioDisp = millis();
 
   logSerial("[DISPENSAR] Iniciado desde: " + String(origen) + " | producto " + String(prodSel) +
-            " | corte por tiempo: " + String(tiempoDispensadoDe(prodSel) / 1000) + "s");
+            " | corte por tiempo: " + String(tiempoDispensadoDe(prodSel, volSel) / 1000.0) + "s");
   cambiarEstado(DISPENSANDO);
   return true;
 }
@@ -872,7 +881,7 @@ void actualizarEstadoTiempos()
   else if (estadoActual == DISPENSANDO)
   {
     unsigned long transcurrido = millis() - tInicioDisp;
-    if (transcurrido >= tiempoDispensadoDe(prodSel))
+    if (transcurrido >= tiempoDispensadoDe(prodSel, volSel))
     {
       apagarBombas();
       logSerial("[DISPENSAR] Completado (por tiempo)");
