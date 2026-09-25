@@ -8,8 +8,11 @@
 #include <LittleFS.h>
 #include <ESPAsyncWebServer.h>
 #include <ArduinoJson.h>
+#include <Preferences.h>
 #include "esp_sleep.h"
 #include "driver/rtc_io.h"
+
+Preferences prefs; // guarda el saldo en memoria no volatil (NVS)
 
 // DEBUG / SERIAL - siempre activo por ahora, se apaga para produccion final
 #define DEBUG true
@@ -50,18 +53,24 @@ const int PIN_NIVEL_3 = 14;
 
 const int PIN_BOTON_DESPERTAR = 13;
 
-const int PIN_FLUJO_1 = 35; // solo productos 1 y 2 tienen caudalimetro
-const int PIN_FLUJO_2 = 34;
-// Producto 3 (alta viscosidad) se controla por tiempo, sin sensor de flujo.
+// Reservados para uso futuro (ya no se usan como sensor de flujo). Quedan
+// como entrada para no perder los pines, sin interrupcion ni logica.
+const int INPUT_AUX_1 = 35;
+const int INPUT_AUX_2 = 34;
 
-// Calibracion de cada sensor de flujo por separado (pulsos por litro, medido con jarra/probeta)
-float FACTOR_PULSOS_POR_LITRO_1 = 530.0;
-float FACTOR_PULSOS_POR_LITRO_2 = 530.0;
-
-// Corte de seguridad por producto (si el sensor no marca nunca el objetivo)
-const unsigned long TIEMPO_MAX_DISPENSADO_1_MS = 5000;
-const unsigned long TIEMPO_MAX_DISPENSADO_2_MS = 5000;
-const unsigned long TIEMPO_MAX_DISPENSADO_3_MS = 5000; // producto 3 ya es por tiempo fijo, este es margen extra
+// Los 3 productos se dispensan por tiempo fijo (sin sensor de flujo).
+// Valor por defecto , editable por producto.
+const unsigned long TIEMPO_DISP_1_MS = 5000UL;
+const unsigned long TIEMPO_DISP_2_MS = 6000UL;
+const unsigned long TIEMPO_DISP_3_MS = 7000UL;
+unsigned long tiempoDispensadoDe(int prod)
+{
+  if (prod == 1)
+    return TIEMPO_DISP_1_MS;
+  if (prod == 2)
+    return TIEMPO_DISP_2_MS;
+  return TIEMPO_DISP_3_MS;
+}
 
 // WIFI SOFTAP (editable) - se enciende solo bajo demanda (metodo QR)
 const char *AP_SSID = "ESP32-DEV";
@@ -81,9 +90,10 @@ struct Producto
 };
 
 Producto productos[3] = {
-    {1, "Producto 1", 4},
-    {2, "Producto 2", 6},
-    {3, "Producto 3", 8}};
+    {1, "Producto 6", 4}, // Producto 1
+    {2, "Producto 5", 6}, // Producto 2
+    {3, "Producto 4", 8}  // Producto 3
+};
 
 const float cantidadesPermitidas[3] = {0.5, 1.0, 2.0};
 
@@ -104,7 +114,7 @@ int calcularCosto(Producto *p, float litros)
   return (int)round(p->precioPorLitro * litros);
 }
 
-// MONEDERO (denominaciones 1, 2, 5 Bs - sin vuelto)
+// MONEDERO (denominaciones 1, 2, 5 Bs - MEDIUN 50 MS o slow 100 ms)
 #define TIEMPO_CONTEO_MONEDA 1000
 #define PULSOS_1BS 2
 #define PULSOS_2BS 4
@@ -118,6 +128,11 @@ unsigned long tInicioConteoMoneda = 0;
 int saldo = 0;
 bool monederoHabilitado = false; // lo controla la FSM segun el estado
 
+void guardarSaldo()
+{
+  prefs.putInt("saldo", saldo);
+}
+
 // MAQUINA DE ESTADOS
 enum EstadoSistema
 {
@@ -125,6 +140,7 @@ enum EstadoSistema
   QR_ESPERA,
   QR_PAGANDO,   // simulacion de pago online (5s)
   PAGO_EXITOSO, // compartido por QR y moneda, esperando boton de boquilla
+  QR_CONTINUAR, // post-dispensado QR: seguir con QR o cancelar (cierra wifi)
   MONEDA_INGRESO,
   SEL_PROD,
   SEL_VOL,
@@ -168,6 +184,8 @@ const char *nombreEstado(EstadoSistema e)
     return "QR_PAGANDO";
   case PAGO_EXITOSO:
     return "PAGO_EXITOSO";
+  case QR_CONTINUAR:
+    return "QR_CONTINUAR";
   case MONEDA_INGRESO:
     return "MONEDA_INGRESO";
   case SEL_PROD:
@@ -191,19 +209,16 @@ int volSel = 0; // 1: 0.5L, 2: 1L, 3: 2L
 int costoSel = 0;
 
 const unsigned long TIEMPO_PAGO_MS = 5000;                       // simulacion de pago QR
-const unsigned long TIEMPO_DISP_MS = 5000;                      // solo para el producto 3 (sin sensor de flujo)
 const unsigned long TIEMPO_FIN_MS = 5000;                        // pantalla "retire su producto"
-const unsigned long TIEMPO_INACTIVIDAD_MS = 2UL * 60UL * 1000UL; // 3 min sin actividad -> deep sleep
+const unsigned long TIEMPO_INACTIVIDAD_MS = 2UL * 60UL * 1000UL; // min sin actividad -> deep sleep
 
 unsigned long tInicioPagoQR = 0;
 unsigned long tInicioDisp = 0;
 unsigned long tInicioFin = 0;
 unsigned long ultimaActividad = 0;
 
-unsigned long pulsosObjetivoActual = 0; // calculado al iniciar cada dispensado (productos 1 y 2)
-
 unsigned long tUltimoHeartbeat = 0;
-const unsigned long HEARTBEAT_MS = 2000; // reenvia el estado actual siempre, por si el HMI se reinicio
+const unsigned long HEARTBEAT_MS = 3000; // reenvia el estado actual siempre, por si el HMI se reinicio
 
 // Botones de boquilla (polling con debounce)
 bool antBoq1 = HIGH, antBoq2 = HIGH, antBoq3 = HIGH;
@@ -215,10 +230,6 @@ unsigned long tCandidatoVacio[3] = {0, 0, 0};
 bool candidatoVacioActivo[3] = {false, false, false};
 const unsigned long TIEMPO_CONFIRMAR_VACIO_MS = 3000;
 
-// Sensores de flujo (solo conteo/log por ahora, sin corte por pulsos)
-volatile unsigned long pulsosFlujo1 = 0;
-volatile unsigned long pulsosFlujo2 = 0;
-
 // OBJETOS DEL SERVIDOR WEB Y HMI
 DNSServer dnsServer;
 AsyncWebServer server(80);
@@ -227,8 +238,6 @@ String bufferHMI = "";
 
 // PROTOTIPOS
 void IRAM_ATTR ISR_Moneda();
-void IRAM_ATTR ISR_Flujo1();
-void IRAM_ATTR ISR_Flujo2();
 int evaluarPulsosMoneda(int p);
 void procesarMoneda();
 void cambiarEstado(EstadoSistema nuevo);
@@ -326,6 +335,7 @@ void procesarMoneda()
   if (valor > 0)
   {
     saldo += valor;
+    guardarSaldo();
     ultimaActividad = millis();
     logSerial("[MONEDERO] Moneda aceptada: " + String(valor) + " Bs | Saldo: " + String(saldo) + " Bs");
     enviarComandoHMI("SALDO:" + String(saldo));
@@ -335,10 +345,6 @@ void procesarMoneda()
     logSerial("[MONEDERO] Moneda no reconocida (pulsos: " + String(p) + ")");
   }
 }
-
-// SENSORES DE FLUJO (solo conteo/log, sin corte todavia)
-void IRAM_ATTR ISR_Flujo1() { pulsosFlujo1++; }
-void IRAM_ATTR ISR_Flujo2() { pulsosFlujo2++; }
 
 // SENSORES DE NIVEL (flotadores, antirrebote por ventana de 3s)
 void chequearSensoresNivel()
@@ -391,26 +397,8 @@ bool iniciarDispensado(const char *origen)
   activarBomba(prodSel);
   tInicioDisp = millis();
 
-  float litros = cantidadesPermitidas[volSel - 1];
-  if (prodSel == 1)
-  {
-    pulsosFlujo1 = 0;
-    pulsosObjetivoActual = (unsigned long)(litros * FACTOR_PULSOS_POR_LITRO_1 + 0.5);
-    logSerial("[DISPENSAR] Corte por FLUJO | objetivo: " + String(pulsosObjetivoActual) + " pulsos");
-  }
-  else if (prodSel == 2)
-  {
-    pulsosFlujo2 = 0;
-    pulsosObjetivoActual = (unsigned long)(litros * FACTOR_PULSOS_POR_LITRO_2 + 0.5);
-    logSerial("[DISPENSAR] Corte por FLUJO | objetivo: " + String(pulsosObjetivoActual) + " pulsos");
-  }
-  else
-  {
-    pulsosObjetivoActual = 0;
-    logSerial("[DISPENSAR] Corte por TIEMPO (sin sensor de flujo, producto 3)");
-  }
-
-  logSerial("[DISPENSAR] Iniciado desde: " + String(origen) + " | producto " + String(prodSel) + " | " + String(litros) + " L");
+  logSerial("[DISPENSAR] Iniciado desde: " + String(origen) + " | producto " + String(prodSel) +
+            " | corte por tiempo: " + String(tiempoDispensadoDe(prodSel) / 1000) + "s");
   cambiarEstado(DISPENSANDO);
   return true;
 }
@@ -450,12 +438,10 @@ void chequearBotonesBoquilla()
   antBoq3 = actBoq3;
 }
 
-// Solo duerme si no hay plata/compra en juego (reposo, o QR esperando sin pagar)
+// Solo duerme en estados de espera, sin compra a mitad de camino
 bool puedeDormir()
 {
-  if (saldo > 0)
-    return false;
-  return (estadoActual == REPOSO || estadoActual == QR_ESPERA);
+  return (estadoActual == REPOSO || estadoActual == QR_ESPERA || estadoActual == QR_CONTINUAR);
 }
 
 // Deep sleep real: apaga WiFi, CPU, todo. Al despertar el ESP32 arranca de
@@ -506,24 +492,25 @@ void detenerServidorWeb()
 // PROTOCOLO UART HACIA EL HMI (Arduino Uno + TFT)
 //
 // ESP32 -> Arduino (una linea de texto por comando, sin ACK):
-//   EST:REPOSO
+//   EST:REPOSO:<saldo>       (saldo 0 si no hay nada pendiente)
 //   EST:QR_ESPERA
 //   EST:QR_PAGANDO
 //   EST:PAGO_EXITOSO:<prod>:<vol>:<costo>
+//   EST:QR_CONTINUAR         (post-dispensado QR: seguir o cancelar)
 //   EST:MONEDA_INGRESO:<saldo>
 //   EST:SEL_PROD:<saldo>:<mascara 3 digitos, 1=disponible 0=vacio>
 //   EST:SEL_VOL:<prod>:<saldo>
 //   EST:CONFIRMACION:<prod>:<vol>:<costo>:<saldo>
-//   EST:DISPENSANDO           (sin segundos: el corte real lo hace el sensor de flujo / el tiempo fijo del producto 3)
+//   EST:DISPENSANDO           (sin tiempo, corte fijo por producto en el ESP32)
 //   EST:FINALIZADO:<costo>
-//   EST:SLEEP                (apagar pantalla por inactividad)
+//   EST:SLEEP                (deep sleep real por inactividad)
 //   SALDO:<valor>            (refresco rapido de saldo sin cambiar de pantalla)
 //
 // El ESP32 tambien reenvia su estado actual cada 2s sin que cambie nada
 // (heartbeat), para que si el HMI se reinicia solo, se resincronice solo.
 //
 // Arduino -> ESP32:
-//   TOQUE:<1-4>               (boton tocado, el ESP32 interpreta segun su estado)
+//   TOQUE:<1-5>               (boton tocado, el ESP32 interpreta segun su estado)
 //   SYNC                      (el Arduino la manda al arrancar, pide el estado actual ya mismo)
 void enviarComandoHMI(String cmd)
 {
@@ -536,7 +523,7 @@ void enviarEstadoHMI()
   switch (estadoActual)
   {
   case REPOSO:
-    enviarComandoHMI("EST:REPOSO");
+    enviarComandoHMI("EST:REPOSO:" + String(saldo));
     break;
   case QR_ESPERA:
     enviarComandoHMI("EST:QR_ESPERA");
@@ -564,6 +551,9 @@ void enviarEstadoHMI()
     break;
   case FINALIZADO:
     enviarComandoHMI("EST:FINALIZADO:" + String(costoSel));
+    break;
+  case QR_CONTINUAR:
+    enviarComandoHMI("EST:QR_CONTINUAR");
     break;
   }
 }
@@ -616,8 +606,7 @@ void manejarToqueHMI(int btn)
     else if (btn == 2)
     {
       metodoActivo = METODO_MONEDA;
-      saldo = 0;
-      cambiarEstado(MONEDA_INGRESO);
+      cambiarEstado(MONEDA_INGRESO); // saldo persistido, no se resetea
     }
     break;
 
@@ -642,6 +631,11 @@ void manejarToqueHMI(int btn)
       {
         cambiarEstado(SEL_PROD);
       }
+    }
+    else if (btn == 5)
+    {
+      metodoActivo = METODO_NINGUNO;
+      cambiarEstado(REPOSO);
     }
     break;
 
@@ -690,10 +684,24 @@ void manejarToqueHMI(int btn)
     break;
   }
 
+  case QR_CONTINUAR:
+    if (btn == 1)
+    { // seguir en QR, el wifi/servidor ya estan prendidos
+      cambiarEstado(QR_ESPERA);
+    }
+    else if (btn == 4)
+    { // cancelar: recien aca se apaga wifi/servidor
+      detenerServidorWeb();
+      metodoActivo = METODO_NINGUNO;
+      cambiarEstado(REPOSO);
+    }
+    break;
+
   case CONFIRMACION:
     if (btn == 1)
     {
       saldo -= costoSel;
+      guardarSaldo();
       logSerial("[MONEDA] Compra confirmada. Producto " + String(prodSel) + " | " + String(costoSel) + " Bs | saldo restante " + String(saldo));
       cambiarEstado(PAGO_EXITOSO);
     }
@@ -864,50 +872,10 @@ void actualizarEstadoTiempos()
   else if (estadoActual == DISPENSANDO)
   {
     unsigned long transcurrido = millis() - tInicioDisp;
-    bool completado = false;
-
-    if (prodSel == 1)
-    {
-      completado = (pulsosFlujo1 >= pulsosObjetivoActual);
-    }
-    else if (prodSel == 2)
-    {
-      completado = (pulsosFlujo2 >= pulsosObjetivoActual);
-    }
-    else
-    {
-      completado = (transcurrido >= TIEMPO_DISP_MS); // producto 3, sin sensor
-    }
-
-    unsigned long tiempoMax = (prodSel == 1)   ? TIEMPO_MAX_DISPENSADO_1_MS
-                              : (prodSel == 2) ? TIEMPO_MAX_DISPENSADO_2_MS
-                                               : TIEMPO_MAX_DISPENSADO_3_MS;
-
-    if (!completado && transcurrido >= tiempoMax)
-    {
-      completado = true;
-      logSerial("[DISPENSAR][ALERTA] Corte de SEGURIDAD por tiempo maximo - revisar sensor de flujo, no llego al objetivo");
-    }
-
-    // Log de progreso cada 250ms (solo Serial, no se manda al HMI)
-    static unsigned long tUltimoLogFlujo = 0;
-    if (millis() - tUltimoLogFlujo >= 250)
-    {
-      tUltimoLogFlujo = millis();
-      unsigned long pulsosActuales = (prodSel == 1) ? pulsosFlujo1 : (prodSel == 2) ? pulsosFlujo2
-                                                                                    : 0;
-      debugPrint("[FLUJO] prod:");
-      debugPrint(prodSel);
-      debugPrint(" pulsos:");
-      debugPrint(pulsosActuales);
-      debugPrint("/");
-      debugPrintln(pulsosObjetivoActual);
-    }
-
-    if (completado)
+    if (transcurrido >= tiempoDispensadoDe(prodSel))
     {
       apagarBombas();
-      logSerial("[DISPENSAR] Completado");
+      logSerial("[DISPENSAR] Completado (por tiempo)");
       tInicioFin = millis();
       cambiarEstado(FINALIZADO);
     }
@@ -919,14 +887,16 @@ void actualizarEstadoTiempos()
       prodSel = 0;
       volSel = 0;
       costoSel = 0;
-      if (metodoActivo == METODO_MONEDA && saldo > 0)
+      if (metodoActivo == METODO_QR)
+      {
+        cambiarEstado(QR_CONTINUAR); // wifi/servidor siguen prendidos, se decide en el HMI
+      }
+      else if (metodoActivo == METODO_MONEDA && saldo > 0)
       {
         cambiarEstado(MONEDA_INGRESO);
       }
       else
       {
-        if (metodoActivo == METODO_QR)
-          detenerServidorWeb();
         metodoActivo = METODO_NINGUNO;
         cambiarEstado(REPOSO);
       }
@@ -950,6 +920,13 @@ void setup()
 
   hmiSerial.begin(HMI_BAUDIOS, SERIAL_8N1, PIN_HMI_RX2, PIN_HMI_TX2);
 
+  prefs.begin("dispensador", false);
+  saldo = prefs.getInt("saldo", 0);
+  logSerial("[NVS] Saldo recuperado: " + String(saldo) + " Bs");
+
+  // saldo = 50; // Pon aquí la cantidad fija que quieras probar (ej: 50 Bs)
+  // guardarSaldo(); // Guarda este valor en NVS para que coincida
+
   pinMode(PIN_PLC_BOMBA_1, OUTPUT);
   pinMode(PIN_PLC_BOMBA_2, OUTPUT);
   pinMode(PIN_PLC_BOMBA_3, OUTPUT);
@@ -970,10 +947,8 @@ void setup()
   digitalWrite(PIN_COIN_SET, LOW); // inhibido al iniciar
   attachInterrupt(digitalPinToInterrupt(PIN_COIN), ISR_Moneda, FALLING);
 
-  pinMode(PIN_FLUJO_1, INPUT);
-  pinMode(PIN_FLUJO_2, INPUT);
-  attachInterrupt(digitalPinToInterrupt(PIN_FLUJO_1), ISR_Flujo1, FALLING);
-  attachInterrupt(digitalPinToInterrupt(PIN_FLUJO_2), ISR_Flujo2, FALLING);
+  pinMode(INPUT_AUX_1, INPUT); // reservado, sin uso por ahora
+  pinMode(INPUT_AUX_2, INPUT); // reservado, sin uso por ahora
 
   if (!LittleFS.begin(true))
   {

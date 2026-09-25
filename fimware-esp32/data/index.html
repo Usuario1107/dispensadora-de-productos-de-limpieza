@@ -449,7 +449,7 @@ async function cargarProductos() {
 function renderizarProductos() {
   const cont = document.getElementById("lista-productos");
   cont.innerHTML = "";
-  productos.forEach((p, i) => {
+  productos.filter(p => p.disponible).forEach((p, i) => {
     const acento = acentos[i % acentos.length];
     const div = document.createElement("div");
     div.className = "tarjeta-producto";
